@@ -32,7 +32,37 @@ Before using this automation, you need:
 
 4. **GitHub Pages Site**: A GitHub Pages site that you want to configure the custom domain for
 
-## Quick Start
+## Deployment Methods
+
+This repository supports **two deployment approaches**:
+
+### Option 1: GitHub Actions (Recommended for Teams) 🚀
+
+Use GitHub Secrets and automated workflows for secure, team-based deployments.
+
+**Benefits**:
+- ✅ Token stored securely in GitHub Secrets (encrypted)
+- ✅ No credentials on local machines
+- ✅ Automated PR validation with Terraform plans
+- ✅ Audit trail of all deployments
+- ✅ Team collaboration without sharing tokens
+
+**Quick Start**: See **[GITHUB_ACTIONS.md](GITHUB_ACTIONS.md)** for complete setup
+
+### Option 2: Local Terraform (For Individual Development)
+
+Use local `terraform.tfvars` file for manual deployments.
+
+**Benefits**:
+- ✅ Simple setup for individual developers
+- ✅ Direct control over deployments
+- ✅ Good for learning and testing
+
+**Quick Start**: See instructions below
+
+---
+
+## Quick Start (Local Deployment)
 
 ### 1. Clone this repository
 

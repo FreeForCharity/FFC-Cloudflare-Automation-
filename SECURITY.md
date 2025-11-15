@@ -6,13 +6,44 @@
 
 **⚠️ CRITICAL: Never commit API tokens to version control**
 
-#### Where the API Token is Stored
+## Two Secure Storage Methods
 
-The CloudFlare API token is stored **only** in the `terraform.tfvars` file, which is:
+This repository supports **two secure methods** for storing the CloudFlare API token:
+
+### Method 1: Local terraform.tfvars (For Individual Development)
+
+The CloudFlare API token is stored in the `terraform.tfvars` file, which is:
 - ✅ Located on your local machine
 - ✅ Excluded from git by `.gitignore`
 - ✅ Never committed to the repository
 - ✅ Never pushed to GitHub
+
+**Use this method when**:
+- Developing and testing locally
+- One-time manual deployments
+- Single developer projects
+
+### Method 2: GitHub Secrets (For Team/CI/CD) ⭐ **RECOMMENDED**
+
+The CloudFlare API token is stored as a GitHub Secret:
+- ✅ Encrypted at rest (AES-256-GCM)
+- ✅ Encrypted in transit (TLS 1.2+)
+- ✅ Centrally managed by repository admins
+- ✅ Never exposed to developers
+- ✅ Audit trail of all usage
+- ✅ Automatic credential rotation support
+
+**Use this method when**:
+- Multiple team members need access
+- Automated CI/CD deployments
+- Want deployment audit trail
+- Tokens shouldn't be on local machines
+
+See **[GITHUB_ACTIONS.md](GITHUB_ACTIONS.md)** for complete GitHub Secrets setup guide.
+
+---
+
+## Local terraform.tfvars Method
 
 #### How to Securely Obtain the Token
 
@@ -104,9 +135,60 @@ If you discover a security vulnerability:
 3. Provide details about the vulnerability
 4. Wait for confirmation before disclosing publicly
 
+## GitHub Secrets Method (Recommended for Teams)
+
+### Setup GitHub Secrets
+
+1. **Navigate to Repository Settings**:
+   - Go to your repository on GitHub
+   - Click **Settings** → **Secrets and variables** → **Actions**
+
+2. **Add CloudFlare API Token**:
+   - Click **New repository secret**
+   - Name: `CLOUDFLARE_API_TOKEN`
+   - Value: Your CloudFlare API token
+   - Click **Add secret**
+
+3. **Deploy Using GitHub Actions**:
+   - Go to **Actions** tab
+   - Select **Terraform Apply** workflow
+   - Click **Run workflow**
+   - Enter domain details
+   - Token is automatically injected from secrets
+
+### Security Benefits
+
+| Feature | Local File | GitHub Secrets |
+|---------|------------|----------------|
+| Encryption at rest | ❌ | ✅ (AES-256) |
+| Shared securely | ❌ | ✅ |
+| Audit trail | ❌ | ✅ |
+| Auto redaction | ❌ | ✅ |
+| CI/CD ready | ❌ | ✅ |
+
+### Best Practices for GitHub Secrets
+
+✅ **DO**:
+- Use GitHub Secrets for production deployments
+- Limit access to secrets (repository admins only)
+- Enable branch protection for main branch
+- Require PR reviews before merge
+- Rotate secrets every 90 days
+- Use workflow dispatch for manual deployments
+
+❌ **DON'T**:
+- Echo secrets in workflow logs
+- Pass secrets as workflow inputs
+- Use secrets in public repositories
+- Share repository admin access unnecessarily
+
+See **[GITHUB_ACTIONS.md](GITHUB_ACTIONS.md)** for complete setup guide.
+
+---
+
 ## Security Checklist
 
-Before deploying:
+### For Local Development:
 
 - [ ] API token stored in `terraform.tfvars` (not committed)
 - [ ] `.gitignore` includes `*.tfvars` (except `*.tfvars.example`)
@@ -115,6 +197,16 @@ Before deploying:
 - [ ] Git history doesn't contain exposed tokens
 - [ ] Token has minimal required permissions
 - [ ] Token is scoped to specific domains only
+
+### For GitHub Actions/CI/CD:
+
+- [ ] CloudFlare API token added to GitHub Secrets
+- [ ] Secret named exactly `CLOUDFLARE_API_TOKEN`
+- [ ] Branch protection enabled on main branch
+- [ ] Required reviews configured
+- [ ] Workflow dispatch used for production deployments
+- [ ] Workflows don't echo secrets
+- [ ] Team members trained on GitHub Actions usage
 
 ## Additional Resources
 
