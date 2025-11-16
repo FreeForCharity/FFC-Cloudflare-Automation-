@@ -39,6 +39,7 @@ jobs:
       uses: hashicorp/setup-terraform@v3
       with:
         terraform_version: 1.6.5
+        terraform_wrapper: false
     
     - name: Terraform Format Check
       run: terraform fmt -check
@@ -58,7 +59,8 @@ jobs:
         TF_VAR_github_pages_domain: ${{ github.event.inputs.github_pages_domain }}
       run: |
         terraform plan -no-color -out=tfplan
-        echo "plan_exitcode=$?" >> $GITHUB_OUTPUT
+        plan_exitcode=$?
+        echo "plan_exitcode=$plan_exitcode" >> $GITHUB_OUTPUT
     
     - name: Terraform Apply
       if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'

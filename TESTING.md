@@ -225,7 +225,7 @@ Expected: `HTTP/1.1 200 OK` or `301` to www version
 **Solution:** Check API token permissions
 ```bash
 # Verify the token in terraform.tfvars
-cat terraform.tfvars | grep cloudflare_api_token
+grep cloudflare_api_token terraform.tfvars
 ```
 
 ### Issue: "Zone not found"
