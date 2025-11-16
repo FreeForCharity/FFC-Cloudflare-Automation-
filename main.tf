@@ -15,7 +15,7 @@ resource "cloudflare_record" "github_pages_a" {
   name    = "@"
   content = var.github_pages_ips[count.index]
   type    = "A"
-  ttl     = var.dns_ttl
+  ttl     = var.proxied ? 1 : var.dns_ttl
   proxied = var.proxied
 
   comment = "GitHub Pages A record ${count.index + 1}"
@@ -29,7 +29,7 @@ resource "cloudflare_record" "github_pages_www" {
   name    = "www"
   content = var.github_pages_domain
   type    = "CNAME"
-  ttl     = var.dns_ttl
+  ttl     = var.proxied ? 1 : var.dns_ttl
   proxied = var.proxied
 
   comment = "GitHub Pages www CNAME record"
