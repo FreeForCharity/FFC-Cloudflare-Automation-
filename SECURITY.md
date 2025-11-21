@@ -10,7 +10,7 @@ This repository includes automated security scanning for Infrastructure-as-Code 
 |------|---------|---------|
 | **tfsec** | Static analysis for Terraform security issues | All PRs and pushes |
 | **Checkov** | Policy-as-code scanner for IaC misconfigurations | All PRs and pushes |
-| **Trivy** | Vulnerability scanner for IaC and container images | All PRs and pushes |
+| **Trivy** | Vulnerability scanner for IaC configurations | All PRs and pushes |
 | **Terraform Validate** | Built-in validation for Terraform syntax and logic | All PRs and pushes |
 
 ### Security Workflow

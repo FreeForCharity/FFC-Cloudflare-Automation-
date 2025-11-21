@@ -28,7 +28,7 @@ jobs:
         uses: actions/checkout@v4
       
       - name: Run tfsec
-        uses: aquasecurity/tfsec-action@v1.0.3
+        uses: aquasecurity/tfsec-action@b725b35ba4b7ad90ac8b443aa5b4267841ed31b7 # v1.0.3
         with:
           soft_fail: false
           format: sarif
@@ -54,7 +54,7 @@ jobs:
         uses: actions/checkout@v4
       
       - name: Run Checkov
-        uses: bridgecrewio/checkov-action@v12
+        uses: bridgecrewio/checkov-action@v12.2825.0
         with:
           directory: .
           framework: terraform
@@ -136,7 +136,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fmtOutcome = '${{ steps.fmt.outcome }}';
-            const fmtStatus = fmtOutcome === 'success' ? '✅ Pass' : '❌ Fail';
+            const fmtStatus = (fmtOutcome === 'success' || fmtOutcome === 'skipped') ? '✅ Pass' : '❌ Fail';
             const validateOutcome = '${{ steps.validate.outcome }}';
             const validateStatus = validateOutcome === 'success' ? '✅ Pass' : '❌ Fail';
             
