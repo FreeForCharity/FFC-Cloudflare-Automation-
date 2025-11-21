@@ -1,75 +1,117 @@
-# FFC-Cloudflare-Automation-
+# FFC-Cloudflare-Automation
 
 Automation utilities for Cloudflare tasks supporting Free For Charity.
 
-## One-Time DNS Update Tool
+## Quick Start: Update Staging DNS
 
-Script: `update_dns.py` updates or creates the `A` record for `staging.clarkemoyer.com`.
+The simplest way to update DNS records for `staging.clarkemoyer.com`:
+
+```bash
+# Install dependencies (first time only)
+pip install -r requirements.txt
+
+# Update staging subdomain IP address
+python update_dns.py --name staging --type A --ip 203.0.113.42
+```
+
+You'll be prompted for your Cloudflare API token, or you can set it as an environment variable:
+
+```bash
+export CLOUDFLARE_API_TOKEN="your_token_here"
+python update_dns.py --name staging --type A --ip 203.0.113.42
+```
+
+**👉 [See detailed staging subdomain guide →](STAGING_README.md)**
+
+## DNS Management Tool
+
+The `update_dns.py` script provides flexible DNS record management for the `clarkemoyer.com` zone.
+
+### Features
+
+- **Create, update, search, and delete** DNS records
+- **Supports A and CNAME** record types
+- **Dry-run mode** to preview changes
+- **Cloudflare proxy** (orange cloud) support
+- **Secure token handling** via environment variable, argument, or prompt
 
 ### Requirements
 
-- Python 3.9+ (tested locally)
-- Install dependencies:
+- Python 3.9+
+- Install dependencies: `pip install -r requirements.txt`
 
-```powershell
-python -m venv .venv; .\.venv\Scripts\activate; pip install -r requirements.txt
+### Basic Examples
+
+**Update or create an A record:**
+```bash
+python update_dns.py --name staging --type A --ip 203.0.113.42
 ```
 
-### Usage
-
-Provide a new IPv4 address for the staging subdomain. Supply the Cloudflare API token either via environment variable, command-line argument, or interactive prompt.
-
-```powershell
-# Option 1: Prompt for token
-python update_dns.py --ip 203.0.113.42
-
-# Option 2: Environment variable
-$env:CLOUDFLARE_API_TOKEN = "cf_api_token_value"
-python update_dns.py --ip 203.0.113.42
-
-# Option 3: Explicit argument
-python update_dns.py --ip 203.0.113.42 --token cf_api_token_value
-
-# Enable Cloudflare proxy (orange cloud)
-python update_dns.py --ip 203.0.113.42 --proxied
-
-# Dry run (no changes, shows intended payload)
-python update_dns.py --ip 203.0.113.42 --dry-run --proxied
+**Update or create a CNAME record:**
+```bash
+python update_dns.py --name www --type CNAME --target example.com
 ```
 
-### Behavior
+**Search for existing records:**
+```bash
+python update_dns.py --name staging --type A --search
+```
 
-Behavior (Python & PowerShell scripts):
+**Delete a specific record:**
+```bash
+python update_dns.py --record-id abc123xyz --delete
+```
 
-- Finds zone ID for `clarkemoyer.com`.
-- Fetches all existing `A` records for `staging.clarkemoyer.com` (supports multiple records).
-	- Each record with differing IP or differing proxied status is updated.
-	- Records already matching requested IP and proxied state are left unchanged.
-	- If no records exist, one is created.
-- TTL fixed at 120 seconds.
-- Add `--proxied` (Python) or `-Proxied` (PowerShell) to turn on Cloudflare proxy (orange cloud).
+**Enable Cloudflare proxy (orange cloud):**
+```bash
+python update_dns.py --name staging --type A --ip 203.0.113.42 --proxied
+```
 
-### PowerShell Variant
+**Dry run (preview changes without applying):**
+```bash
+python update_dns.py --name staging --type A --ip 203.0.113.42 --dry-run
+```
 
-Script: `Update-StagingDns.ps1` mirrors Python functionality (multi-record, dry-run, proxy flag).
+### Full Usage
+
+```
+python update_dns.py [options]
+
+Options:
+  --name NAME           Subdomain name (e.g., 'staging' for staging.clarkemoyer.com)
+  --type {A,CNAME}      DNS record type
+  --ip IP               New IPv4 address for A records
+  --target TARGET       Target domain for CNAME records
+  --record-id ID        Specific record ID for deletion
+  --search              Search and display existing records
+  --delete              Delete the specified record
+  --token TOKEN         Cloudflare API token
+  --dry-run             Show intended changes without applying
+  --proxied             Enable Cloudflare proxy (orange cloud)
+```
+
+### Token Security
+
+- API tokens are never logged
+- Use environment variables to avoid command-line exposure:
+  ```bash
+  export CLOUDFLARE_API_TOKEN="your_token_here"
+  ```
+- Use Cloudflare API tokens with minimal permissions (DNS:Edit for the target zone)
+- Dry-run mode allows inspection before making changes
+
+## PowerShell Alternative
+
+For staging subdomain updates only, a PowerShell script is available:
 
 ```powershell
-# Prompt for token
 ./Update-StagingDns.ps1 -NewIp 203.0.113.42
-
-# With environment token & proxy
-$env:CLOUDFLARE_API_TOKEN = "cf_api_token_value"
-./Update-StagingDns.ps1 -NewIp 203.0.113.42 -Proxied
-
-# Dry run
-./Update-StagingDns.ps1 -NewIp 203.0.113.42 -DryRun -Proxied
 ```
 
-### Token Scope Recommendation
+**👉 [See PowerShell details in staging guide →](STAGING_README.md)**
 
-Use a Cloudflare API Token with the minimal permissions (e.g. DNS:Edit for the target zone) rather than the global key.
+## Additional Resources
 
-### Safety
-
-The token is never logged. Dry-run mode allows inspection before changes. All matching A records for the FQDN are processed.
+- **[Staging Subdomain Guide](STAGING_README.md)** - Detailed guide for managing staging.clarkemoyer.com
+- **[verify_old_token.json.README.md](verify_old_token.json.README.md)** - Information about the test token response file
 
