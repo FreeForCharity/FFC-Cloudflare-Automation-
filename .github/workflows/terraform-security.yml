@@ -113,7 +113,7 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          # Using same version as terraform-apply.yml and terraform-plan.yml for consistency
+          # Matches version used in other Terraform workflows (apply/plan) for consistency
           terraform_version: 1.6.5
       
       - name: Terraform Format Check
