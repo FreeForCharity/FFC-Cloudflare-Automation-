@@ -31,7 +31,6 @@ env/
 *.tfvars
 *.tfvars.json
 !*.tfvars.example
-!examples/*.tfvars
 .terraform/
 .terraform.lock.hcl
 crash.log

@@ -4,17 +4,17 @@ This directory contains example Terraform variable files for different use cases
 
 ## Available Examples
 
-### 1. Basic Configuration (`basic.tfvars`)
+### 1. Basic Configuration (`basic.tfvars.example`)
 
 Minimal setup with default settings. Good for getting started quickly.
 
 **Use case:** Simple GitHub Pages site with standard configuration
 
 ```bash
-terraform apply -var-file=examples/basic.tfvars
+terraform apply -var-file=examples/basic.tfvars.example
 ```
 
-### 2. With CloudFlare CDN (`with-cdn.tfvars`)
+### 2. With CloudFlare CDN (`with-cdn.tfvars.example`)
 
 Enables CloudFlare's CDN proxying for improved performance and DDoS protection.
 
@@ -27,12 +27,12 @@ Enables CloudFlare's CDN proxying for improved performance and DDoS protection.
 - Web application firewall (on paid plans)
 
 ```bash
-terraform apply -var-file=examples/with-cdn.tfvars
+terraform apply -var-file=examples/with-cdn.tfvars.example
 ```
 
 **Note:** When using proxied mode, some GitHub Pages features may behave differently.
 
-### 3. Strict SSL (`strict-ssl.tfvars`)
+### 3. Strict SSL (`strict-ssl.tfvars.example`)
 
 Maximum security configuration with strict SSL/TLS settings.
 
@@ -45,10 +45,10 @@ Maximum security configuration with strict SSL/TLS settings.
 - HTTPS enforcement
 
 ```bash
-terraform apply -var-file=examples/strict-ssl.tfvars
+terraform apply -var-file=examples/strict-ssl.tfvars.example
 ```
 
-### 4. Apex Domain Only (`apex-only.tfvars`)
+### 4. Apex Domain Only (`apex-only.tfvars.example`)
 
 Configuration for root domain only, without www subdomain.
 
@@ -60,7 +60,7 @@ Configuration for root domain only, without www subdomain.
 - Standard SSL settings
 
 ```bash
-terraform apply -var-file=examples/apex-only.tfvars
+terraform apply -var-file=examples/apex-only.tfvars.example
 ```
 
 ## Using Examples
@@ -69,7 +69,7 @@ terraform apply -var-file=examples/apex-only.tfvars
 
 ```bash
 # Copy example and modify
-cp examples/basic.tfvars terraform.tfvars
+cp examples/basic.tfvars.example terraform.tfvars
 nano terraform.tfvars
 
 # Apply
@@ -80,15 +80,15 @@ terraform apply
 
 ```bash
 # Apply without creating terraform.tfvars
-terraform apply -var-file=examples/basic.tfvars
+terraform apply -var-file=examples/basic.tfvars.example
 ```
 
 ### Method 3: Multiple Environments
 
 ```bash
 # Create environment-specific files
-cp examples/basic.tfvars prod.tfvars
-cp examples/with-cdn.tfvars staging.tfvars
+cp examples/basic.tfvars.example prod.tfvars
+cp examples/with-cdn.tfvars.example staging.tfvars
 
 # Apply to specific environment
 terraform apply -var-file=prod.tfvars
