@@ -8,7 +8,8 @@ github_pages_domain  = "username.github.io"
 # Enable CloudFlare CDN proxying
 proxied = true
 
-# CDN works best with automatic TTL
+# CDN works best with automatic TTL (when proxied=true, TTL is automatically set to 1)
+# This dns_ttl setting is ignored when proxied is enabled
 dns_ttl = 1
 
 # Standard HTTPS settings

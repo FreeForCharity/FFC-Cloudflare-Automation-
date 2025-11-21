@@ -42,7 +42,7 @@ resource "cloudflare_record" "github_pages_caa" {
   zone_id = data.cloudflare_zone.domain.id
   name    = "@"
   type    = "CAA"
-  ttl     = var.dns_ttl
+  ttl     = var.proxied ? 1 : var.dns_ttl
 
   content = "${var.caa_records[count.index].flags} ${var.caa_records[count.index].tag} \"${var.caa_records[count.index].value}\""
 

@@ -4,7 +4,7 @@ Get your GitHub Pages custom domain up and running in 5 minutes!
 
 ## Prerequisites Checklist
 
-- [ ] Terraform installed (1.0+)
+- [ ] Terraform installed (1.6+)
 - [ ] CloudFlare account with domain added
 - [ ] CloudFlare API token created
 - [ ] GitHub Pages site ready

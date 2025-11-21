@@ -64,6 +64,9 @@ jobs:
       with:
         github-token: ${{ secrets.GITHUB_TOKEN }}
         script: |
+          const planOutcome = '${{ steps.plan.outcome }}';
+          const planStatus = planOutcome === 'success' ? '✅ Success' : planOutcome === 'failure' ? '❌ Failed' : '⚠️ ' + planOutcome;
+          
           const output = `#### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
           #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
           #### Terraform Validation 🤖\`${{ steps.validate.outcome }}\`
@@ -75,7 +78,7 @@ jobs:
 
           </details>
 
-          #### Terraform Plan 📖\`${{ steps.plan.outcome }}\`
+          #### Terraform Plan 📖 ${planStatus}
           
           <details><summary>Show Plan</summary>
           

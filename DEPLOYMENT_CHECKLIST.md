@@ -16,7 +16,7 @@ Use this checklist when deploying the CloudFlare automation for ffcadmin.org.
 - [ ] CloudFlare zone status is "Active"
 
 ### Local Environment
-- [ ] Terraform installed (v1.0.0+)
+- [ ] Terraform installed (v1.6.0+)
 - [ ] Git repository cloned
 - [ ] Working directory: `FFC-Cloudflare-Automation-`
 

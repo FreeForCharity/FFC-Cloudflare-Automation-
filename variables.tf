@@ -26,7 +26,7 @@ variable "github_pages_ips" {
 }
 
 variable "dns_ttl" {
-  description = "TTL for DNS records (1 = automatic)"
+  description = "TTL for DNS records when not proxied (ignored when proxied=true, which requires TTL=1)"
   type        = number
   default     = 1
 }

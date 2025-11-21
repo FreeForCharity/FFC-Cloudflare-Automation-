@@ -16,7 +16,7 @@ This Terraform configuration automatically sets up all the necessary DNS records
 
 Before using this automation, you need:
 
-1. **Terraform**: Install Terraform (version 1.0 or later)
+1. **Terraform**: Install Terraform (version 1.6.0 or later)
    - Download from: https://www.terraform.io/downloads
    - Or use a package manager (e.g., `brew install terraform` on macOS)
 

@@ -69,8 +69,4 @@ jobs:
     
     - name: Terraform Output
       if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-      env:
-        TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        TF_VAR_domain_name: ${{ github.event.inputs.domain_name }}
-        TF_VAR_github_pages_domain: ${{ github.event.inputs.github_pages_domain }}
       run: terraform output
