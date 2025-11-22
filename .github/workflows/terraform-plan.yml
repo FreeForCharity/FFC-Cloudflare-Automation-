@@ -43,7 +43,7 @@ jobs:
     - name: Terraform Init
       id: init
       if: env.SECRET_MISSING == 'false'
-      run: terraform init
+      run: terraform init -backend=false
     
     - name: Terraform Validate
       id: validate

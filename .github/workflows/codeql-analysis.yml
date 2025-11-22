@@ -3,8 +3,16 @@ name: "CodeQL Security Analysis"
 on:
   push:
     branches: [ main ]
+    paths:
+      - '**.py'
+      - '**.ps1'
+      - 'requirements.txt'
   pull_request:
     branches: [ main ]
+    paths:
+      - '**.py'
+      - '**.ps1'
+      - 'requirements.txt'
   schedule:
     # Run at 6:00 AM UTC every Monday
     - cron: '0 6 * * 1'
