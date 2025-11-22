@@ -3,8 +3,16 @@ name: "CodeQL Security Analysis"
 on:
   push:
     branches: [ main ]
+    paths:
+      - '**.py'
+      - '**.ps1'
+      - 'requirements.txt'
   pull_request:
     branches: [ main ]
+    paths:
+      - '**.py'
+      - '**.ps1'
+      - 'requirements.txt'
   schedule:
     # Run at 6:00 AM UTC every Monday
     - cron: '0 6 * * 1'
@@ -21,11 +29,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [ 'javascript-typescript' ]
+        language: [ 'python' ]
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v5
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
