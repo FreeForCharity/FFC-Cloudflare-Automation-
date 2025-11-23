@@ -5,6 +5,9 @@ on:
     branches:
       - main
       - master
+    paths:
+      - '**.tf'
+      - '.github/workflows/terraform-security.yml'
   pull_request:
     branches:
       - main

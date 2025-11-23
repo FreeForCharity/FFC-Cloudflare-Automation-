@@ -1,21 +1,12 @@
 name: "CodeQL Security Analysis"
 
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - '**.py'
-      - '**.ps1'
-      - 'requirements.txt'
-  pull_request:
-    branches: [ main ]
-    paths:
-      - '**.py'
-      - '**.ps1'
-      - 'requirements.txt'
-  schedule:
-    # Run at 6:00 AM UTC every Monday
-    - cron: '0 6 * * 1'
+  # CodeQL disabled for this infrastructure repository
+  # Uncomment to enable scheduled scans only
+  # schedule:
+  #   # Run at 6:00 AM UTC every Monday
+  #   - cron: '0 6 * * 1'
+  workflow_dispatch:
 
 jobs:
   analyze:
