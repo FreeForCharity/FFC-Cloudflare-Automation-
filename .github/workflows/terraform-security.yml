@@ -25,7 +25,7 @@ jobs:
     
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       
       - name: Run tfsec
         uses: aquasecurity/tfsec-action@b725b35ba4b7ad90ac8b443aa5b4267841ed31b7 # v1.0.3
@@ -51,7 +51,7 @@ jobs:
     
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       
       - name: Run Checkov
         uses: bridgecrewio/checkov-action@v12.2825.0
@@ -80,7 +80,7 @@ jobs:
     
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       
       - name: Run Trivy vulnerability scanner in IaC mode
         uses: aquasecurity/trivy-action@0.28.0
@@ -108,7 +108,7 @@ jobs:
     
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
