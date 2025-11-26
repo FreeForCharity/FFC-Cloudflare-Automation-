@@ -5,6 +5,9 @@ on:
     branches:
       - main
       - master
+    paths:
+      - '**.tf'
+      - '.github/workflows/terraform-security.yml'
   pull_request:
     branches:
       - main
@@ -25,10 +28,10 @@ jobs:
     
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       
       - name: Run tfsec
-        uses: aquasecurity/tfsec-action@b725b35ba4b7ad90ac8b443aa5b4267841ed31b7 # v1.0.3
+        uses: aquasecurity/tfsec-action@v1.0.3
         with:
           soft_fail: false
           format: sarif
@@ -51,7 +54,7 @@ jobs:
     
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       
       - name: Run Checkov
         uses: bridgecrewio/checkov-action@v12.2825.0
@@ -80,10 +83,10 @@ jobs:
     
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       
       - name: Run Trivy vulnerability scanner in IaC mode
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.33.1
         with:
           scan-type: 'config'
           scan-ref: '.'
@@ -108,7 +111,7 @@ jobs:
     
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3

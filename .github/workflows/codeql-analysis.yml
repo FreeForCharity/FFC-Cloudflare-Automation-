@@ -1,13 +1,12 @@
 name: "CodeQL Security Analysis"
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
-  schedule:
-    # Run at 6:00 AM UTC every Monday
-    - cron: '0 6 * * 1'
+  # CodeQL disabled for this infrastructure repository
+  # Uncomment to enable scheduled scans only
+  # schedule:
+  #   # Run at 6:00 AM UTC every Monday
+  #   - cron: '0 6 * * 1'
+  workflow_dispatch:
 
 jobs:
   analyze:
@@ -21,11 +20,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [ 'javascript-typescript' ]
+        language: [ 'python' ]
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v5
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
