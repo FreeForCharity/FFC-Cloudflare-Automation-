@@ -65,3 +65,30 @@
   white-space: nowrap;
   border: 0;
 }
+
+/* --- Captured sidebar widgets: touch-target size (WCAG 2.5.8) -------------
+   WordPress widget lists — the RSS feed titles, category and archive links in
+   Divi's sidebar — render as ~21px-tall inline links, under the 24x24 minimum
+   Lighthouse enforces at error level through the accessibility category. They
+   appear on 569 of this site's 587 pages, and cost it 3 points there; the six
+   pages sampled during development happened to be the sidebar-less ones, so
+   the first CI run on a wider page list was what surfaced it.
+
+   Padding rather than a font change: the links stay exactly the size the
+   charity designed them, and only the clickable box grows. `inline-block` is
+   what lets the vertical padding count toward the box at all. */
+.ffc-clone .et_pb_widget a,
+.ffc-clone .rsswidget {
+  display: inline-block;
+  min-height: 24px;
+  min-width: 24px;
+  padding-block: 2px;
+  text-align: center;
+}
+/* Text links in the widget lists read left-aligned; only the icon-sized
+   targets needed centring, and `min-width` alone would have left the RSS
+   feed icon 14px wide — measured, after the height fix above already passed. */
+.ffc-clone .et_pb_widget li a,
+.ffc-clone .rsswidget.rss-widget-title {
+  text-align: left;
+}

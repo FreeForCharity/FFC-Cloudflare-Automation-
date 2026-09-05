@@ -9,6 +9,7 @@
 // sitemap cannot disagree with what is published" structural rather than a
 // property a unit test has to keep asserting.
 import { readdirSync } from 'node:fs'
+import type { Dirent } from 'node:fs'
 import { join } from 'node:path'
 import type { MetadataRoute } from 'next'
 import { siteUrl } from '@/lib/site.config'
@@ -23,7 +24,10 @@ const NOT_A_ROUTE_DIR = /^[(_[]/
 
 /** Every static route under src/app, as the path it is served at. */
 export function discoverRoutes(dir: string = APP_DIR, prefix = ''): string[] {
-  let entries
+  // Typed rather than inferred: this file ships verbatim into every FFC-EX
+  // repo, and an implicitly-`any` binding trips `noImplicitAny` in any of them
+  // that turns it on.
+  let entries: Dirent[]
   try {
     entries = readdirSync(dir, { withFileTypes: true })
   } catch {

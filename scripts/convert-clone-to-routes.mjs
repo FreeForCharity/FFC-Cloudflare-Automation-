@@ -57,6 +57,8 @@ import {
   extractBody,
   extractHead,
   extractTitle,
+  detectTitleSuffix,
+  stripTitleSuffix,
   extractMetaDescription,
   deriveDescription,
   collectHeadings,
@@ -189,6 +191,30 @@ function main() {
   }
 
   const resolveCapturedAsset = makeAssetResolver(publicDir, assetsDir);
+
+  // Read every captured title before emitting any route: the brand suffix is a
+  // property of the SITE, so it can only be derived once all of them are in
+  // hand. Cheap — the documents are read again below, from the page cache.
+  const capturedTitles = htmlFiles.map((f) =>
+    extractTitle(readFileSync(join(publicDir, f), 'utf8')),
+  );
+  const detectedSuffix = detectTitleSuffix(capturedTitles);
+  // Strip the suffix ONLY when the layout is going to put the same name back.
+  //
+  // `title.template` appends `siteConfig.name`, so on a repo that has been
+  // rebranded to the charity, stripping turns
+  // `About Us | Charity | Charity` into `About Us | Charity`. On a repo still
+  // carrying the FFC template's identity it would instead turn
+  // `About Us | Charity | Free For Charity` into `About Us | Free For Charity`
+  // — deleting the charity's name from all 587 titles to leave only its
+  // sponsor's. Duplicated branding is untidy; losing the charity's name is a
+  // regression, so the untidy one is the safe side to fail to.
+  const configuredName = readSiteConfigName(repo);
+  const rebranded =
+    detectedSuffix &&
+    configuredName &&
+    detectedSuffix.trim().toLowerCase() === configuredName.trim().toLowerCase();
+  const titleSuffix = rebranded ? detectedSuffix : null;
 
   const { assigned, collisions, duplicates } = assignSlugs(htmlFiles);
   // Link rewriting is keyed on the path the capture actually wrote, because
@@ -329,7 +355,17 @@ function main() {
     out = transformInlineStyles(out).html;
 
     // 6. Metadata.
-    const title = extractTitle(html) || slug || siteName;
+    // The layout carries `title.template` (`%s | <site name>`), so a captured
+    // title that still ends in the brand renders it twice.
+    //
+    // The front page is the exception, and Next.js is the reason: a template
+    // applies to CHILD segments, and `app/page.tsx` shares the root segment
+    // with `app/layout.tsx`, so nothing appends the brand there. Stripping it
+    // leaves the site's front page titled `Home` — measured, and a worse title
+    // than the one the capture came with.
+    const capturedTitle = extractTitle(html);
+    const title =
+      (slug ? stripTitleSuffix(capturedTitle, titleSuffix) : capturedTitle) || slug || siteName;
     let description = extractMetaDescription(html);
     if (!description) {
       description = deriveDescription(body);
@@ -412,6 +448,14 @@ function main() {
   console.log('--- conversion ---------------------------------------------');
   console.log(`site                  ${siteName || '(unknown)'}`);
   console.log(`routes written        ${tally.pages}`);
+  console.log(
+    `brand suffix in captured titles  ${detectedSuffix ?? '(none detected)'}` +
+      `  ->  ${
+        titleSuffix
+          ? 'stripped (siteConfig.name matches; the layout re-appends it)'
+          : `KEPT (siteConfig.name is ${JSON.stringify(configuredName)}, so stripping would leave only that)`
+      }`,
+  );
   console.log(`slug collisions       ${collisions.length}`);
   for (const c of collisions) console.log(`  ${c.base} -> ${c.slug}  (${c.localPath})`);
   console.log(`duplicate URLs collapsed  ${duplicates.length}`);
@@ -640,6 +684,18 @@ function safeDecode(value) {
     return decodeURIComponent(value);
   } catch {
     return value;
+  }
+}
+
+/** `siteConfig.name` from the target repo, or null if it cannot be read. */
+function readSiteConfigName(repo) {
+  try {
+    const src = readFileSync(join(repo, 'src', 'lib', 'site.config.ts'), 'utf8');
+    // The first `name:` inside the exported object literal — the type
+    // declaration above it has no value to match.
+    return /^\s*name:\s*['"]([^'"]+)['"]/m.exec(src)?.[1] ?? null;
+  } catch {
+    return null;
   }
 }
 

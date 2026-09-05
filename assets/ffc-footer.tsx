@@ -21,15 +21,29 @@ import { siteConfig } from '@/lib/site.config'
  *   4. Copyright line with the build year and the charity's name.
  *   5. Policy links.
  *
- * The 501(c)(3) status line and the Candid seal are Level 2 items and are shown
- * only when siteConfig carries a real EIN — a pre-501c3 site claiming the
- * status would be a false legal claim, so the absence is rendered as an
- * absence rather than filled in.
+ * The EIN and the Candid transparency link are Level 2 items, and they are NOT
+ * rendered merely because the fields are populated. The FFC template ships Free
+ * For Charity's OWN EIN and Candid profile as defaults, and the shared
+ * SiteConfig schema requires both to be non-empty — so a site nobody has
+ * supplied an EIN for cannot leave them blank, and would publish FFC's tax ID
+ * as the charity's own legal identity. Measured on this migration: 596 pages
+ * read "Free For Charity — EIN 46-2471893" above a different charity's content.
+ *
+ * So the still-the-template values are treated as absent, which is what they
+ * are. `scripts/rebrand-check.mjs` encodes the same list and reports them as
+ * outstanding; this is the same judgement applied where it is publicly visible.
+ * The moment a real EIN is set the identity line starts carrying it, with no
+ * further edit here.
  */
+const TEMPLATE_EIN = '46-2471893'
+const TEMPLATE_GUIDESTAR = 'https://www.guidestar.org/profile/46-2471893'
 export default function FfcFooter() {
   const year = new Date().getFullYear()
-  const ein = siteConfig.ein?.trim()
-  const taxStatusLabel = siteConfig.taxStatusLabel.trim()
+  const rawEin = siteConfig.ein?.trim() ?? ''
+  const ein = rawEin === TEMPLATE_EIN ? '' : rawEin
+  const profileUrl = siteConfig.guidestar?.profileUrl
+  const candidUrl = profileUrl === TEMPLATE_GUIDESTAR ? '' : profileUrl
+  const taxStatusLabel = siteConfig.taxStatusLabel?.trim() ?? ''
   const policyLinks = [
     { name: 'Privacy Policy', href: '/privacy-policy' },
     { name: 'Cookie Policy', href: '/cookie-policy' },
@@ -43,9 +57,9 @@ export default function FfcFooter() {
     <footer className="ffc-footer" aria-label="Site information and policies">
       <div className="ffc-footer__inner">
         <p className="ffc-footer__identity">
-          {ein && siteConfig.guidestar?.profileUrl ? (
+          {ein && candidUrl ? (
             <a
-              href={siteConfig.guidestar.profileUrl}
+              href={candidUrl}
               target="_blank"
               rel="noopener noreferrer"
               // The accessible name must contain the visible text

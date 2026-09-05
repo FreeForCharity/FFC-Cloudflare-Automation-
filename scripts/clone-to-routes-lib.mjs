@@ -103,6 +103,67 @@ export function extractTitle(html) {
   return decodeEntities(raw).replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * The brand suffix WordPress appends to every page title.
+ *
+ * Derived from the titles themselves rather than taken from a flag: the suffix
+ * is whatever trailing `| …` segment the site puts on a clear majority of its
+ * pages. A capture whose titles disagree has no suffix worth stripping, and
+ * gets none — which is the safe outcome, since removing the wrong trailing
+ * words would silently rename pages.
+ */
+export function detectTitleSuffix(titles, { minShare = 0.6 } = {}) {
+  const counts = new Map();
+  let considered = 0;
+  for (const title of titles) {
+    if (typeof title !== 'string') continue;
+    const m = /\s[|–—-]\s+([^|–—]+)$/.exec(title.trim());
+    if (!m) continue;
+    considered += 1;
+    const tail = m[1].trim();
+    counts.set(tail, (counts.get(tail) ?? 0) + 1);
+  }
+  if (!considered) return null;
+  let best = null;
+  for (const [tail, n] of counts) {
+    if (!best || n > best.n) best = { tail, n };
+  }
+  // Share of ALL titles, not of the ones that happen to have a separator: a
+  // suffix on a handful of pages is a coincidence, not the site's branding.
+  return best && best.n / titles.length >= minShare ? best.tail : null;
+}
+
+/**
+ * Remove the site's brand suffix from one page title.
+ *
+ * The App Router layout carries `title.template` (`%s | <site name>`), so a
+ * title that already ends in the brand is rendered with it twice — measured
+ * here as `Volunteers | Viewpoint Ministries International | Free For Charity`
+ * on 550 of 596 pages, which is both the duplication and a second brand from a
+ * template nobody had rebranded. The suffix is stripped so the template appends
+ * it exactly once.
+ *
+ * A title that is ONLY the brand (the front page's, often) keeps it: stripping
+ * would leave the page with no title at all.
+ */
+export function stripTitleSuffix(title, suffix) {
+  if (typeof title !== 'string' || !suffix) return title;
+  const trimmed = title.trim();
+  // The separator's leading whitespace is optional because a page with an
+  // empty title still gets the suffix: this capture really contains
+  // `<title>| Viewpoint Ministries International</title>` on a comment
+  // pagination page. Requiring the space left that one unstripped, and the
+  // layout template then appended the brand a second time.
+  const re = new RegExp(`\\s*[|\\u2013\\u2014-]\\s*${escapeRe(suffix)}$`);
+  const stripped = trimmed
+    .replace(re, '')
+    .replace(/^[\s|\u2013\u2014-]+/, '')
+    .trim();
+  // Nothing left but the brand — the caller falls back to the slug rather than
+  // publishing an empty <title>.
+  return stripped;
+}
+
 export function extractMetaDescription(html) {
   const m =
     /<meta[^>]*\bname\s*=\s*["']description["'][^>]*\bcontent\s*=\s*["']([^"']*)["']/i.exec(html) ??
@@ -496,6 +557,24 @@ export function escapeHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+/**
+ * `decodeURIComponent` that returns its input instead of throwing.
+ *
+ * A malformed percent-escape (`%ZZ`, a stray `%`) raises `URIError`, and the
+ * inputs here are captured URLs from a site whose permalinks already contain
+ * an OBJECT REPLACEMENT CHARACTER — assuming they are well-formed is not a
+ * safe assumption to build 596 pages on. Decoding is a nicety in both callers
+ * (a prettier link name, a prettier embed title); aborting the whole
+ * conversion over one bad escape is not a trade worth making.
+ */
+export function safeDecodeURIComponent(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 export function labelForHref(href, siteName) {
   if (typeof href !== 'string' || !href) return null;
   if (/^(#|mailto:|tel:|javascript:)/i.test(href)) return null;
@@ -505,7 +584,7 @@ export function labelForHref(href, siteName) {
   }
   const seg = path.split(/[?#]/)[0].replace(/\/+$/, '').split('/').filter(Boolean).pop();
   if (!seg) return siteName ? `${siteName} — home` : 'Home';
-  const words = decodeURIComponent(seg)
+  const words = safeDecodeURIComponent(seg)
     .replace(/\.[a-z0-9]+$/i, '')
     .replace(/[-_]+/g, ' ')
     .trim();
@@ -569,7 +648,7 @@ export function titleForEmbed(src) {
     break;
   }
   if (!slug) return null;
-  const words = decodeURIComponent(slug)
+  const words = safeDecodeURIComponent(slug)
     .replace(/\.[a-z0-9]{1,5}$/i, '')
     .replace(/[-_]+/g, ' ')
     .replace(/\s+/g, ' ')
@@ -806,8 +885,11 @@ export function removeDeadConsentUi(html) {
     },
   );
   // The overlay divs the plugin appends after its own block, if any escaped it.
-  const swept = out.replace(/<div class="cli-modal-backdrop[^"]*"><\/div>/gi, () => {
-    bytes += 1;
+  // `bytes` is what the caller reports as "MB removed", so it has to be the
+  // length of what was removed. Counting 1 per backdrop made that figure a
+  // mixture of two different units.
+  const swept = out.replace(/<div class="cli-modal-backdrop[^"]*"><\/div>/gi, (whole) => {
+    bytes += whole.length;
     return '';
   });
   return { html: swept, removed, bytes };
@@ -1153,6 +1235,58 @@ function selfTest() {
     null,
   );
 
+  // The layout carries `title.template` (`%s | <site name>`), so a captured
+  // title that already ends in the brand renders it twice — 550 of 596 pages
+  // here read "Volunteers | Viewpoint Ministries International | Free For
+  // Charity".
+  const TITLES = [
+    'Home | Viewpoint Ministries',
+    'About Us | Viewpoint Ministries',
+    'Volunteers | Viewpoint Ministries',
+    'Contact',
+  ];
+  eq(
+    'the brand suffix is derived from the titles themselves',
+    detectTitleSuffix(TITLES),
+    'Viewpoint Ministries',
+  );
+  eq(
+    'a suffix only a few pages carry is a coincidence, not branding',
+    detectTitleSuffix(['A | X', 'B', 'C', 'D', 'E']),
+    null,
+  );
+  eq('titles with no separator yield no suffix', detectTitleSuffix(['A', 'B']), null);
+  eq(
+    'the suffix is removed so the template can append it once',
+    stripTitleSuffix('Volunteers | Viewpoint Ministries', 'Viewpoint Ministries'),
+    'Volunteers',
+  );
+  eq(
+    'an en dash separator is handled too',
+    stripTitleSuffix('Volunteers \u2013 Viewpoint Ministries', 'Viewpoint Ministries'),
+    'Volunteers',
+  );
+  // No separator, so there is no suffix to strip — the title IS the page's
+  // title, which is the front page's usual shape.
+  eq(
+    'a bare brand title is left alone',
+    stripTitleSuffix('Viewpoint Ministries', 'Viewpoint Ministries'),
+    'Viewpoint Ministries',
+  );
+  // A page with an empty title still gets the suffix: this capture really
+  // contains `<title>| Viewpoint Ministries</title>`, and requiring whitespace
+  // before the separator left it unstripped and doubly branded.
+  eq(
+    'a title that is only a separator and the brand strips to nothing',
+    stripTitleSuffix('| Viewpoint Ministries', 'Viewpoint Ministries'),
+    '',
+  );
+  eq(
+    'a title that merely mentions the brand mid-string is untouched',
+    stripTitleSuffix('Viewpoint Ministries at 10 | Events', 'Viewpoint Ministries'),
+    'Viewpoint Ministries at 10 | Events',
+  );
+
   // --- derived descriptions ------------------------------------------
   // 343 of 589 pages ship without one. Derived from the page's own words.
   const LONG = 'a'.repeat(30) + ' ' + 'b'.repeat(30) + ' ' + 'c'.repeat(200);
@@ -1454,6 +1588,17 @@ function selfTest() {
   );
   eq('an embed with no src is left alone', titleIframes('<iframe></iframe>').titled, 0);
 
+  // A malformed escape raises URIError, and these inputs are captured URLs from
+  // a site whose permalinks already contain an OBJECT REPLACEMENT CHARACTER.
+  eq('a malformed escape does not throw', safeDecodeURIComponent('a%ZZb'), 'a%ZZb');
+  eq('a well-formed one still decodes', safeDecodeURIComponent('a%20b'), 'a b');
+  eq('a link name survives a malformed escape in its href', labelForHref('../a%ZZb/', ''), 'A%ZZb');
+  eq(
+    'so does an embed title',
+    titleForEmbed('https://anchor.fm/embed/episodes/a%ZZb-and-c'),
+    'A%ZZb and c — embedded from anchor.fm',
+  );
+
   // --- tokenization ---------------------------------------------------
   eq(
     'a page-relative asset path becomes a base token',
@@ -1609,6 +1754,13 @@ function selfTest() {
   eq('the dead consent banner is gone', consent.html.includes('cookie-law-info-bar'), false);
   eq('so is the modal it could never open', consent.html.includes('cliSettingsPopup'), false);
   eq('and its backdrop', consent.html.includes('cli-modal-backdrop'), false);
+  // The caller reports this as "MB removed", so it must be a length, not a
+  // count — mixing the two made the figure meaningless.
+  eq(
+    'the byte tally is the length of what was removed',
+    consent.bytes,
+    CONSENT.length - '<p>keep me</p><p>and me</p>'.length,
+  );
   eq('the page content around it is untouched', consent.html, '<p>keep me</p><p>and me</p>');
   // The marker pair is the plugin's own; another plugin using it must not lose
   // a section of the charity's content to this.
