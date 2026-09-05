@@ -489,6 +489,88 @@ def test_a_non_mapping_document_is_a_finding():
     assert len(unreadable) == 1, f"expected one unreadable, got {unreadable}"
 
 
+def test_a_solver_that_does_not_converge_is_a_finding_not_a_partial_result():
+    """Exhausting the iteration bound must fail closed, never truncate.
+
+    A truncated pass returns the hops it happens to have found and prints the
+    reassuring OK line for the rest — under-reporting, which is the exact
+    direction this guard exists to close. Driven by shrinking the bound rather
+    than by constructing a pathological workflow, so the test states the
+    contract instead of depending on a workflow shape that a later refactor
+    could make converge.
+    """
+    # CONTROL first: with the real bound this sample converges and reports its
+    # one hop, so a failure below is attributable to the shrunk bound and not
+    # to the sample (ledger L209).
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write(pathlib.Path(tmp), "999-sample.yml", LAUNDERING)
+        hops, unreadable, _ = guard.scan_all([path])
+    assert len(hops) == 1 and unreadable == [], (
+        f"CONTROL: expected one hop and no unreadable, got {hops} {unreadable}"
+    )
+
+    # One pass cannot settle: the first pass discovers the writer's output, so
+    # a second is needed just to observe that nothing further changed.
+    original = guard.Analysis._pass_limit
+    guard.Analysis._pass_limit = lambda self: 1
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(pathlib.Path(tmp), "999-sample.yml", LAUNDERING)
+            hops, unreadable, _ = guard.scan_all([path])
+    finally:
+        guard.Analysis._pass_limit = original
+
+    assert hops == [], "a non-converged analysis must contribute no hops"
+    assert len(unreadable) == 1, f"expected one unreadable, got {unreadable}"
+    assert "did not converge" in unreadable[0], unreadable[0]
+
+    # And the restore is real, not assumed.
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write(pathlib.Path(tmp), "999-sample.yml", LAUNDERING)
+        hops, unreadable, _ = guard.scan_all([path])
+    assert len(hops) == 1 and unreadable == [], "bound not restored after the test"
+
+
+def test_an_unreadable_from_the_analysis_names_the_workflow():
+    """A fail-closed report nobody can act on is only half a guard.
+
+    `Analysis` does not know which file it was built from, so without the
+    re-raise its message reaches `scan_all`'s unreadable list naming no
+    workflow — and the operator gets "something did not converge" with 108
+    candidates.
+    """
+    original = guard.Analysis._pass_limit
+    guard.Analysis._pass_limit = lambda self: 1
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(pathlib.Path(tmp), "999-named.yml", LAUNDERING)
+            _hops, unreadable, _ = guard.scan_all([path])
+    finally:
+        guard.Analysis._pass_limit = original
+
+    assert len(unreadable) == 1, f"expected one unreadable, got {unreadable}"
+    assert unreadable[0].startswith("999-named.yml: "), (
+        f"the finding must name the workflow, got {unreadable[0]!r}"
+    )
+
+
+def test_the_convergence_bound_scales_with_the_workflow():
+    """"Bound exhausted" must mean "the analysis is wrong", not "this is big".
+
+    A fixed bound would make a legitimately deep workflow indistinguishable
+    from a broken solver, and the fail-closed behaviour above turns that
+    confusion into a CI failure on a correct file.
+    """
+    small = yaml.safe_load(LAUNDERING)
+    analysis = guard.Analysis(small, {"domain"})
+    assert analysis.jobs, "the sample must have jobs for this to mean anything"
+    # Convergence on the real tree is the practical assertion: every shipped
+    # workflow settles inside its own bound, so no file in the repo is
+    # reported unreadable for this reason.
+    _hops, unreadable, _ = guard.scan_all()
+    assert unreadable == [], f"the real tree must converge: {unreadable}"
+
+
 # --- the freeze is exact in BOTH directions --------------------------------
 
 

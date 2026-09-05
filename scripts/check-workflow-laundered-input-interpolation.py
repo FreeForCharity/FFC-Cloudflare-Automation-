@@ -312,12 +312,39 @@ class Analysis:
 
     # -- fixpoint ---------------------------------------------------------
 
+    def _pass_limit(self) -> int:
+        """How many passes a correct solver may need on THIS workflow.
+
+        Its own method so a test can shrink it and drive the real loop into the
+        non-convergence branch. Verifying that branch by faking the exception
+        would assert on the plumbing and leave the branch itself unexecuted —
+        the same "reading the guard proves it is wired, never that it detects"
+        problem the module docstring is about.
+        """
+        return 10 + len(self.jobs) + sum(len(_steps(j)) for j in self.jobs.values())
+
     def _resolve(self) -> None:
-        # A bound rather than `while True`: the lattice only grows and the
-        # chains here are three hops deep, so a run that has not settled after
-        # this many passes is a bug in the analysis, not a deep workflow — and
-        # it should surface as a wrong answer under test rather than a hang.
-        for _ in range(10):
+        # A bound rather than `while True`, because a solver that cannot
+        # terminate must not hang CI. What the bound must NOT do is return the
+        # partial result it has: every element still missing is a hop that goes
+        # unreported, and under-reporting is the precise direction this guard
+        # exists to close — a truncated pass would print the reassuring
+        # "laundered dispatch-input interpolation OK" line while the payload
+        # still executes. So exhausting the bound is a FINDING, not a fallback
+        # (Copilot on #1240; the same fail-closed rule the parser already
+        # follows for a file it cannot read).
+        #
+        # The bound is generous rather than tight because the passes are not
+        # equivalent: taint spreads through as many hops per pass as the job
+        # iteration order happens to allow, so an unlucky order advances one
+        # hop per pass and a legitimately deep workflow needs one pass per job.
+        # Scaling it with the workflow's own size keeps "bound exhausted"
+        # meaning "the analysis is wrong", never "this workflow is big".
+        # Every non-final pass adds at least one element to a lattice bounded
+        # by the workflow's finite name space, so a correct solver converges
+        # far inside this.
+        limit = self._pass_limit()
+        for _ in range(limit):
             before = (
                 len(self.tainted_step_outputs)
                 + len(self.tainted_job_outputs)
@@ -358,6 +385,11 @@ class Analysis:
             )
             if after == before:
                 return
+        raise WorkflowUnreadable(
+            f"taint analysis did not converge in {limit} passes "
+            f"({len(self.jobs)} jobs); refusing to report a partial result, "
+            "because every hop still missing would be reported as absent"
+        )
 
 
 def scan_workflow(path: pathlib.Path) -> list[Hop]:
@@ -381,7 +413,16 @@ def scan_workflow(path: pathlib.Path) -> list[Hop]:
     if not free_text:
         return []
 
-    analysis = Analysis(workflow, free_text)
+    # Re-raised with the filename. `Analysis` cannot know which file it was
+    # built from, so an unqualified message lands in `scan_all`'s unreadable
+    # list naming no workflow — a fail-closed report nobody can act on is only
+    # half a guard (Copilot on #1240). Every other raise on this path is
+    # already prefixed the same way.
+    try:
+        analysis = Analysis(workflow, free_text)
+    except WorkflowUnreadable as error:
+        raise WorkflowUnreadable(f"{path.name}: {error}") from error
+
     hops: list[Hop] = []
     for job_id, job in analysis.jobs.items():
         for index, step in enumerate(_steps(job)):
