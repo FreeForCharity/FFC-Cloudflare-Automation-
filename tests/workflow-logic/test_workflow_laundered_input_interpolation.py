@@ -437,6 +437,29 @@ def test_a_direct_input_reference_is_left_to_the_sibling():
     )
 
 
+def test_the_finding_renders_a_real_actions_expression():
+    """A finding must quote the expression in the form it appears in the file.
+
+    The f-string that builds it is `${{{{{self.expression}}}}}` — five braces a
+    side, four of which are escapes for two literals. That is unreadable enough
+    that a review pass read it as emitting `${{{...}}}` and filed it as a defect
+    (Copilot on #1240, second round). It does not: the rendered text is exactly
+    `${{ … }}`. Asserting on the RENDERED string rather than on the source is
+    the whole point — brace-counting in an f-string is what produced the wrong
+    reading, and the same trap is waiting for the next person to edit this
+    line.
+    """
+    hop = guard.Hop(
+        "706-x.yml", "convert", "Gate", "run",
+        "needs.resolve.outputs.domain", " needs.resolve.outputs.domain ", 608,
+    )
+    rendered = str(hop)
+    assert "`${{ needs.resolve.outputs.domain }}`" in rendered, rendered
+    assert "{{{" not in rendered, f"extra opening brace: {rendered}"
+    assert "}}}" not in rendered, f"extra closing brace: {rendered}"
+    assert rendered.startswith("706-x.yml:608 "), rendered
+
+
 # --- the line citation -----------------------------------------------------
 
 
@@ -555,7 +578,7 @@ def test_an_unreadable_from_the_analysis_names_the_workflow():
 
 
 def test_the_convergence_bound_scales_with_the_workflow():
-    """"Bound exhausted" must mean "the analysis is wrong", not "this is big".
+    """An exhausted bound must mean the analysis is wrong, not that it is big.
 
     A fixed bound would make a legitimately deep workflow indistinguishable
     from a broken solver, and the fail-closed behaviour above turns that
