@@ -237,6 +237,13 @@ function main() {
     detectedSuffix.trim().toLowerCase() === configuredName.trim().toLowerCase();
   const titleSuffix = rebranded ? detectedSuffix : null;
 
+  // The FFC template ships `pageMetadata()`, which already handles Next's
+  // shallow metadata merge (per-page og/twitter that keep the site's image and
+  // site_name). Prefer it when the repo has it; a repo without it gets the
+  // inline form. Checked rather than assumed, because these routes are written
+  // into whatever repo the workflow is pointed at.
+  const pageMetadataHelper = existsSync(join(repo, 'src', 'lib', 'page-metadata.ts'));
+
   const { assigned, collisions, duplicates } = assignSlugs(htmlFiles);
   // Link rewriting is keyed on the path the capture actually wrote, because
   // that is what the markup references; the sanitized slug is where the route
@@ -400,7 +407,14 @@ function main() {
       write(join(repo, 'src', 'clone-content', `${slug || 'index'}.html`), fragment);
       write(
         join(repo, 'src', 'app', slug, 'page.tsx'),
-        routeSource({ slug, title, description, wrapperClass, absoluteTitle: !rebranded }),
+        routeSource({
+          slug,
+          title,
+          description,
+          wrapperClass,
+          absoluteTitle: !rebranded,
+          pageMetadataHelper,
+        }),
       );
     }
     tally.pages += 1;
