@@ -332,8 +332,34 @@ class Tree:
                     "a clean backlog it never examined."
                 )
 
+    def _within(self, path):
+        """`root / path` resolved, or None if it escapes the checkout.
+
+        Every path this class touches was extracted from an ISSUE BODY, which
+        anyone able to file an issue controls. The path pattern legitimately
+        allows `.` and `/` (real citations contain both), so it also admits
+        `scripts/../../etc/hostname`, and `root / path` resolves that happily.
+
+        Containment is verified rather than `..` blacklisted, matching
+        `d2cdef9` on this branch: a blacklist has to enumerate every spelling
+        of an escape (`..`, an absolute path, a symlink out of the tree), while
+        resolving and comparing answers all three at once -- `resolve()`
+        follows symlinks, so a link inside the repo pointing out is caught too.
+
+        The leak this closes is not just existence. `read` feeds the anchor
+        comparison, and the attacker supplies the anchor as well as the path,
+        so an uncontained read is a content ORACLE over any readable file on
+        the host: quote a guess, see whether the issue is reported."""
+        try:
+            resolved = (self.root / path).resolve()
+        except (OSError, RuntimeError):  # RuntimeError: symlink loop
+            return None
+        root = self.root.resolve()
+        return resolved if resolved == root or resolved.is_relative_to(root) else None
+
     def exists(self, path):
-        return (self.root / path).is_file()
+        target = self._within(path)
+        return bool(target) and target.is_file()
 
     def read(self, path):
         """`path`'s current content.
@@ -367,8 +393,18 @@ class Tree:
         `test_an_undecodable_byte_cannot_fabricate_or_hide_a_finding` pins the
         behaviour in both directions and pins that the two policies still
         match."""
+        target = self._within(path)
+        if target is None:
+            # Unreachable through `audit`, which only reads paths `exists()`
+            # accepted -- so this cannot be tripped from an issue body and is
+            # not a denial-of-service vector. It is here so the containment
+            # rule holds at every filesystem entry point rather than only at
+            # the one the current caller happens to use.
+            raise SystemExit(
+                f"error: refusing to read {path!r}: it resolves outside {self.root}."
+            )
         try:
-            return (self.root / path).read_text(encoding="utf-8", errors="replace")
+            return target.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
             raise SystemExit(
                 f"error: cannot read {self.root / path} ({exc.strerror or exc}), "

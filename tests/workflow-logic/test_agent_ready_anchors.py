@@ -743,6 +743,51 @@ def test_the_module_runner_reports_a_SystemExit_instead_of_being_ended_by_it():
     assert out.count("PASS") == 2, out
 
 
+def test_a_cited_path_cannot_escape_the_checkout():
+    """Copilot round 10, a security finding, and it was live: reproduced before
+    the fix, `exists('scripts/../../outside.txt')` returned True and `read` on
+    it returned the file's contents.
+
+    The leak is not only existence. `read` feeds the anchor comparison and the
+    attacker supplies the anchor as well as the path -- anyone who can file an
+    issue in a scanned repo gets a content ORACLE over any readable file on the
+    host: quote a guess, see whether the issue is reported.
+
+    Fixed by verifying containment rather than blacklisting `..`, matching
+    `d2cdef9` on this branch. The symlink case is why: a blacklist has to
+    enumerate every spelling of an escape, while resolving and comparing
+    catches `..`, an absolute path and a link out of the tree at once.
+
+    All four directions in one fixture. A "fix" that refused everything would
+    satisfy the two escapes and destroy the sweep, so the two positive cases
+    are load-bearing rather than decorative.
+    """
+    import os as _os
+    import tempfile as _tf
+
+    with _tf.TemporaryDirectory() as td:
+        base = pathlib.Path(td)
+        root = base / "repo"
+        (root / "scripts").mkdir(parents=True)
+        (base / "outside.txt").write_text("SENTINEL\n", encoding="utf-8")
+        (root / "scripts" / "real.py").write_text("x = 1\n", encoding="utf-8")
+        _os.symlink(base / "outside.txt", root / "scripts" / "link.py")
+
+        tree = M.Tree(root)
+        assert tree.exists("scripts/../../outside.txt") is False, "traversal must not resolve"
+        assert tree.exists("scripts/link.py") is False, "a symlink out of the tree must not resolve"
+        assert tree.exists("scripts/real.py") is True, "an ordinary path must still resolve"
+        assert tree.read("scripts/real.py") == "x = 1\n", "an ordinary read must still work"
+
+        # And the escape must not reach `read` even if a caller asks directly.
+        try:
+            tree.read("scripts/../../outside.txt")
+        except SystemExit as exc:
+            assert "resolves outside" in str(exc), exc
+        else:
+            raise AssertionError("read must refuse a path outside the checkout")
+
+
 def test_a_cited_directory_is_not_reported_as_path_gone():
     # `docs/data` has git history (its children do) but no content of its own.
     # The first live run reported it as PATH GONE against issue #859.
