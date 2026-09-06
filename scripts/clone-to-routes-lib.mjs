@@ -1173,7 +1173,16 @@ export function routeSource({
       `    canonical: ${tsString(canonical)},`,
       '  }),',
     );
-    if (!description) lines.push('  description: undefined,');
+    // NOTHING between the spread and the title override. An earlier version
+    // pushed `description: undefined` here to honour the older "omit the key
+    // rather than emit an empty one" contract — but in a spread that DELETES
+    // the description `pageMetadata` had just set from the title, so the page
+    // shipped with no `<meta name="description">` at all. Measured: it hit
+    // `/about-us/`, one of the nine Lighthouse-audited pages, and took its SEO
+    // score 100 -> 92, under the 98 error threshold, turning a green required
+    // check red. An absent description is the thing the fallback exists to
+    // prevent; suppressing an empty one and suppressing a real one are not the
+    // same operation. Raised on FFC-EX-vpmin.org#27.
     // `pageMetadata` returns a bare string title for the layout template to
     // consume. On a repo whose `siteConfig.name` is not this site's brand that
     // template appends the wrong name, so the absolute form overrides it here,
@@ -2069,6 +2078,24 @@ function selfTest() {
   eq(
     'a route with no description omits it from the social blocks too',
     routeSource({ slug: 'x', title: 'X' }).includes('description'),
+    false,
+  );
+
+  // The helper path is the OPPOSITE, and the difference is the point. Omitting
+  // the key is right when there is nothing to put in it; on the helper path
+  // the title stands in, so a page always ships a `<meta name="description">`.
+  // Emitting `description: undefined` after the spread deleted that and cost
+  // `/about-us/` its Lighthouse SEO score (100 -> 92, under the 98 error
+  // threshold). Both directions are asserted so neither can come back.
+  const noDesc = routeSource({ slug: 'about-us', title: 'About Us', pageMetadataHelper: true });
+  eq(
+    'the helper path substitutes the title when the capture gave no description',
+    /pageMetadata\(\{[\s\S]*?description: 'About Us',/.test(noDesc),
+    true,
+  );
+  eq(
+    'and never overrides the spread with an undefined description',
+    noDesc.includes('description: undefined'),
     false,
   );
 
