@@ -47,6 +47,25 @@
     non-zero, which is what makes it easy to misread: it looks like "the check ran and flagged the
     `.py`", not like "nothing you cared about was checked". A batched verification couples its
     inputs — one unparseable file voids the rest. Ledger **L240**.
+  - **…and anchor the check at the repo root, because `.` follows the Bash tool's cwd, which
+    persists between calls.** Same failure as L240, reached from the other side: there a missing
+    flag aborted the run before the Markdown, here a drifted cwd left it out of the file set
+    entirely. Verifying a ledger edit on #1242, the pre-commit `prettier --check . --ignore-unknown`
+    printed `All matched files use Prettier code style!` and exited 0; CI then failed
+    `Check formatting (Prettier)` naming `docs/lessons-ledger.md`. The cwd had moved to
+    `tests/workflow-logic` **two Bash calls earlier**, in a command that ran a test module — the
+    `cd` persists, the edit did not care, and `.` resolved to a directory whose only Markdown was an
+    already-clean README. Measured: run from that subdirectory the invocation emits a
+    **byte-identical** success line to a full-repo pass, so nothing in the output distinguishes "400
+    files clean" from "you checked the wrong subtree". Name explicit paths, or anchor it:
+
+    ```bash
+    npx --yes prettier@3.8.1 --check "$(git rev-parse --show-toplevel)" --ignore-unknown
+    ```
+
+    Not a ledger row: `docs/lessons-ledger.md` had 1,051 bytes of headroom under the 1 MiB
+    large-blob guard when this was found, and the row that would have recorded it is what pushed the
+    file 2,115 bytes over. Filed as its own issue instead.
 
 ## Verifying tests: CI is authoritative, local runs may be false-red
 
