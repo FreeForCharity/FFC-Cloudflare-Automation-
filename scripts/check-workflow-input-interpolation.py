@@ -957,7 +957,34 @@ KNOWN_UNGUARDED: dict[str, tuple[str, ...]] = {
         "min_days_to_expiry",
         "post_reg_lock_days",
     ),
-    "116-domain-transfer-epp-probe.yml": ("domain",),
+    # 116-domain-transfer-epp-probe.yml burned down: `domain` now reaches the one
+    # pwsh body through step-level `env:` (IN_DOMAIN), and the job-summary line that
+    # re-interpolated it reads the local `$domain` instead. It runs on whmcs-prod
+    # and can ask a registrar to release a transfer auth code; the WHMCS credential
+    # in reach is the workflow's ONLY credential and arrives through GITHUB_ENV from
+    # `whmcs-secrets-from-kv`, invisible to both the L213 `env:` read and the #1141
+    # `secrets.` grep.
+    #
+    # Both of its call sites sat in DOUBLE quotes, so unlike 118 no quote breakout
+    # was needed — `$( )` expands there. Measured on the shipped body with `domain`
+    # = `example.org$($null = Set-Content -Path <sentinel> -Value
+    # $env:WHMCS_API_SECRET)`: secret stolen, callee still handed a legal
+    # `Domain=[example.org]`, step exited 0. `$null =` is what keeps the value legal
+    # and the log ordinary.
+    #
+    # It is also the lane that BOUNDS L214 rather than re-confirming it. Every
+    # earlier lane's fail-closed guard closed a silent shift the remedy introduced;
+    # here it closes nothing silent, because every other element this body splats is
+    # a SWITCH and a switch cannot absorb a value. Measured with the guard removed:
+    # unset -> `Missing an argument for parameter 'Domain'`, empty -> `Cannot bind
+    # argument to parameter 'Domain' because it is an empty string`, both rc 1. The
+    # guard stays because it attributes the fault to the missing `env:` mapping
+    # instead of to the callee — but "L214 shift" is not what it prevents here, and
+    # a lane that copied 118's reasoning would have said so untruthfully.
+    # Ledger L260.
+    #
+    # `mode` (choice) and `show_code` (boolean) stay interpolated and are NOT
+    # findings.
     "117-domain-transfer-verify.yml": ("domain",),
     # 118-whmcs-domain-lock.yml burned down: `domain` now reaches the one pwsh body
     # through step-level `env:` (IN_DOMAIN). It runs on whmcs-prod and changes a
