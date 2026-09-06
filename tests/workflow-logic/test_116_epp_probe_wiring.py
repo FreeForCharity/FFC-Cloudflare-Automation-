@@ -583,7 +583,11 @@ def test_an_empty_domain_fails_closed_and_says_so():
         f"the failure must name the cause so an operator can act on it. "
         f"Output: {out.strip()[:400]}"
     )
-    assert CALLEE not in out or "CALLED" not in out, (
+    # The stub announces itself with "CALLED" and never prints its own filename,
+    # so `CALLEE not in out` is true on every path and a disjunction on it can
+    # never fail -- the assertion would vouch for a guard that had let the call
+    # through. Assert on what the stub actually emits.
+    assert "CALLED" not in out, (
         f"the callee was invoked despite the empty guard. Output: {out.strip()[:400]}"
     )
 
