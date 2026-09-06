@@ -520,6 +520,19 @@ function main() {
   // A page that reached no route, or an HTML file left where a second copy of
   // the site would be published from, is a silent failure in the direction
   // nobody checks. Fail rather than report it in a line that scrolls past.
+  // The whole conversion depends on `trailingSlash: true`: the captured pages
+  // link to each other with a trailing slash, so without it the migrated site's
+  // own navigation 404s. Reporting that and exiting 0 would hand back a
+  // "successful" conversion that does not work.
+  const ts = shape.trailingSlash;
+  if (!dryRun && ts && !ts.changed && ts.reason !== 'already set') {
+    console.error(
+      `could not set trailingSlash in next.config.ts (${ts.reason}); the converted` +
+        " site's own internal links would 404. Set `trailingSlash: true` and re-run.",
+    );
+    process.exit(1);
+  }
+
   // Every captured file is either a route or a deliberately collapsed duplicate
   // of one. Anything else means a page fell out of the migration silently.
   if (tally.pages + duplicates.length !== htmlFiles.length) {
@@ -607,17 +620,26 @@ function enableTrailingSlash(repo) {
     return { changed: false, reason: 'no next.config.ts' };
   }
   if (/\btrailingSlash\s*:/.test(source)) return { changed: false, reason: 'already set' };
-  const anchor = /(\n\s*output:\s*'export',)/;
-  if (!anchor.test(source)) return { changed: false, reason: "no `output: 'export'` to anchor to" };
+  // Tolerant of how the line is written: either quote style, comma optional.
+  // The original anchor required single quotes AND a trailing comma, and
+  // matched 1 of those 4 formats — measured. The other three returned
+  // "changed: false" and the conversion carried on, producing a site whose
+  // own internal links 404. A formatting preference in the receiving repo is
+  // not a reason to ship that.
+  const anchor = /\n[ \t]*output:\s*['"]export['"][ \t]*,?/;
+  const found = anchor.exec(source);
+  if (!found) return { changed: false, reason: "no `output: 'export'` to anchor to" };
+  const line = found[0];
+  const withComma = line.endsWith(',') ? line : `${line},`;
   const note =
     '\n  // The source WordPress served every page at a trailing-slash URL, and the\n' +
     '  // converted pages link to each other the same way. Without this the export\n' +
     '  // writes `about-us.html` and `/about-us/` 404s on GitHub Pages — so this is\n' +
-    '  // not a style preference: it is what keeps the migrated site’s own internal\n' +
+    '  // not a style preference: it is what keeps the migrated site\u2019s own internal\n' +
     '  // links working, and what keeps every inbound link and search result that\n' +
     '  // points at the old URLs landing on the page it used to.\n' +
     '  trailingSlash: true,';
-  write(path, source.replace(anchor, `$1${note}`));
+  write(path, source.replace(line, `${withComma}${note}`));
   return { changed: true };
 }
 
@@ -903,11 +925,30 @@ function selfTest() {
       true,
     );
     eq('a second run does not add it twice', enableTrailingSlash(dir).changed, false);
+    // The original anchor required single quotes AND a trailing comma, so it
+    // matched 1 of these 4 and silently no-op'd on the rest — a conversion that
+    // reported success and shipped a site whose own links 404.
+    for (const [label, line] of [
+      ['single quotes, comma', "  output: 'export',"],
+      ['double quotes, comma', '  output: "export",'],
+      ['single quotes, no comma', "  output: 'export'"],
+      ['double quotes, no comma', '  output: "export"'],
+    ]) {
+      write(join(dir, 'next.config.ts'), `const nextConfig = {\n${line}\n}\n`);
+      eq(`trailingSlash is set for: ${label}`, enableTrailingSlash(dir).changed, true);
+      const after = readFileSync(join(dir, 'next.config.ts'), 'utf8');
+      eq(`  and the output line keeps its comma: ${label}`, /export['"],/.test(after), true);
+      eq(
+        `  and trailingSlash lands inside the object: ${label}`,
+        /trailingSlash: true,\n\}/.test(after),
+        true,
+      );
+    }
     write(join(dir, 'next.config.ts'), 'const nextConfig = {}\n');
     eq(
       'a config with no static export is left alone rather than guessed at',
-      enableTrailingSlash(dir).changed,
-      false,
+      enableTrailingSlash(dir).reason,
+      "no `output: 'export'` to anchor to",
     );
 
     // lhci asserts accessibility and SEO at ERROR level, so auditing 404s
