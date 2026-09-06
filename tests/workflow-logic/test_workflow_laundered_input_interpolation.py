@@ -578,7 +578,7 @@ def test_an_unreadable_from_the_analysis_names_the_workflow():
 
 
 def test_the_convergence_bound_scales_with_the_workflow():
-    """An exhausted bound must mean the analysis is wrong, not that it is big.
+    """An exhausted bound must mean the analysis is wrong, not that this is big.
 
     A fixed bound would make a legitimately deep workflow indistinguishable
     from a broken solver, and the fail-closed behaviour above turns that
