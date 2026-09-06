@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -41,6 +42,47 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "capture-wordpress-api.mjs"
 STUB = REPO_ROOT / "tests" / "fixtures" / "wp-fetch-stub.mjs"
 NODE = shutil.which("node") or "node"
+
+# Mirrors of the patterns in `normalizeAccessibility()`. They are constants
+# because keeping them inline let this test drift from the pass twice on one
+# PR (#1239) — once on case sensitivity, once on `\b`.
+#
+# `(?:^|\s)` before an attribute name, never `\b`: `-` is a non-word
+# character, so `\b` sits INSIDE `data-name`, `data-content` and `data-role`.
+# The pass documents this on its `role` check; the consequence here is that the
+# test reads the wrong attribute and then fails, or passes, for a reason that
+# has nothing to do with the page. Measured before the fix, on
+# `<meta name="viewport" data-content="user-scalable=no" content="width=device-width">`:
+# the content read returned `user-scalable=no` — a correct page failing the
+# zoom assertion on an attribute that is not the viewport's.
+VIEWPORT_META_RE = r"<meta(?:\s[^>]*)?\sname\s*=\s*[\"']viewport[\"'][^>]*>"
+META_CONTENT_RE = r"(?:^|\s)content\s*=\s*[\"']([^\"']*)[\"']"
+ROLE_MAIN_RE = r"(?:^|\s)role\s*=\s*[\"']main[\"']"
+
+
+def test_the_accessibility_patterns_do_not_match_data_attributes() -> None:
+    """The mirrors above must discriminate, or the smoke assertion is noise.
+
+    Pure and offline — no capture — because what is under test is the pattern,
+    not the pipeline. Every decoy here is markup a real theme can emit.
+    """
+    real = '<meta name="viewport" content="width=device-width">'
+    assert re.search(VIEWPORT_META_RE, real, re.I)
+    assert re.search(VIEWPORT_META_RE, real.upper().replace("WIDTH=DEVICE-WIDTH", "x"), re.I)
+    assert re.search(VIEWPORT_META_RE, '<meta name = "viewport" content = "x">', re.I)
+    assert not re.search(VIEWPORT_META_RE, '<meta data-name="viewport" content="x">', re.I)
+    assert not re.search(VIEWPORT_META_RE, '<meta name="description" content="x">', re.I)
+
+    # The content read must take the tag's own `content`, not a `data-content`
+    # sitting to its left — `re.search` returns the LEFTMOST match.
+    decoy = '<meta name="viewport" data-content="user-scalable=no" content="width=device-width">'
+    assert re.search(META_CONTENT_RE, decoy, re.I).group(1) == "width=device-width"
+
+    assert re.search(ROLE_MAIN_RE, '<div role="main">', re.I)
+    assert re.search(ROLE_MAIN_RE, "<div ROLE='main'>", re.I)
+    assert not re.search(ROLE_MAIN_RE, '<div data-role="main">', re.I)
+    assert not re.search(ROLE_MAIN_RE, '<div role="navigation">', re.I)
+
 
 
 def run_capture(out_dir: pathlib.Path) -> tuple[subprocess.CompletedProcess, dict | None]:
@@ -188,6 +230,104 @@ def test_a_reference_the_origin_404s_is_reproduced_rather_than_gating() -> None:
         assert failures["total"] >= 1, failures
         html = (out / "about-us" / "index.html").read_text(encoding="utf-8")
         assert "gone.png" in html, "the dead reference should survive, not be scrubbed"
+
+
+def test_the_cms_accessibility_defects_are_corrected() -> None:
+    """Zoom and a main landmark. Both are the CMS's output, not the site's words.
+
+    Measured with Lighthouse on the real capture: these two carry weights 10 and
+    3, the largest accessibility failures on the page, and fixing them moved the
+    score 79 -> 95. What stays failing there is `link-name` and `heading-order`,
+    which are the charity's own markup — an `alt=""` on their logo and headings
+    that skip a level. A migration that silently rewrote those would no longer
+    be a mirror, so it does not.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        out = pathlib.Path(td) / "site"
+        run_capture(out)
+        html = (out / "about-us" / "index.html").read_text(encoding="utf-8")
+
+        # Assert the CONTRACT, not something stronger than it. Banning the
+        # directives outright would fail a page that legitimately carries
+        # `user-scalable=yes` or a generous cap — both of which the pass
+        # deliberately keeps, because removing them would be its own defect.
+        # Raised in review on #1239: as first written this passed only because
+        # the fixture happens to use the restrictive form.
+        #
+        # Read the tag the way `normalizeAccessibility()` writes it, not the way
+        # this fixture happens to spell it — the shared patterns are defined at
+        # the top of this module, so the assertion cannot drift from the pass
+        # again. It did, twice, both caught in review on #1239: first
+        # case-SENSITIVE (of `<meta name=`, `<META NAME=`, `<meta Name=` and
+        # `<meta name = `, it found only the first) and then, after that fix,
+        # still anchored on `\b`, which sits inside `data-name`/`data-content`.
+        tag = re.search(VIEWPORT_META_RE, html, re.I)
+        assert tag, "the viewport meta should still be present"
+        content = re.search(META_CONTENT_RE, tag.group(0), re.I)
+        assert content, tag.group(0)
+        parts = [p.strip() for p in content.group(1).split(",")]
+
+        for p in parts:
+            assert not re.fullmatch(r"user-scalable\s*=\s*(no|0)", p, re.I), p
+            cap = re.fullmatch(r"maximum-scale\s*=\s*([\d.]+)", p, re.I)
+            if cap:
+                assert float(cap.group(1)) >= 5, f"a cap under 5x is a restriction: {p}"
+        assert "width=device-width" in parts, parts
+        # Same reason, one line down: the pass only INJECTS `role="main"` when
+        # the wrapper has no role of its own, so on a page that already carried
+        # `ROLE='main'` a substring test fails on a landmark that is present.
+        assert re.search(
+            ROLE_MAIN_RE, html, re.I
+        ), "a screen reader needs a skip-to-content target"
+
+
+def test_a_page_link_to_itself_is_brought_home_too() -> None:
+    """A page's link to itself is rewritten, asserted here on /about-us/.
+
+    What is asserted and what motivated it are different pages, deliberately,
+    and the docstring used to describe only the second — flagged in review on
+    #1239.
+
+    The motivating case is the FRONT page: the header logo points at the site
+    root, so there it is a self-link, and skipping self-links left it absolute
+    pointing at the host being decommissioned. Everywhere else the root is a
+    different entry and was rewritten normally, so 588 of 589 pages looked
+    right — which is why it survived the stranded-navigation fix.
+
+    That instance cannot be asserted from this fixture: its front page
+    redirects off-site and is correctly REFUSED, so no `index.html` is written
+    (see `test_a_front_page_that_redirects_off_site_is_refused_not_stored`).
+    The mechanism is the same one, so it is exercised on `/about-us/`'s link to
+    itself instead. Making the fixture serve a well-formed front page purely to
+    assert this would cost the refusal case, which is the more valuable of the
+    two.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        out = pathlib.Path(td) / "site"
+        run_capture(out)
+        html = (out / "about-us" / "index.html").read_text(encoding="utf-8")
+        assert 'href="https://fixture.test/about-us/"' not in html, html[:400]
+        assert 'href="../about-us/"' in html
+
+
+def test_navigation_to_the_stale_host_is_brought_home() -> None:
+    """The defect the whole migration turned on, end to end for the first time.
+
+    The fixture's menu links to `https://parked.example/` — the host the CMS
+    names in `home` and does not serve. 562 of 589 real pages carried exactly
+    this, and every menu click left the site.
+
+    Worth recording how this case became real: the fixture originally wrote the
+    href WITHOUT a scheme, so it was a relative path and never resolved off-site
+    at all. The test read as coverage of stale-host rewriting and was covering
+    nothing. Caught in review on #1235.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        out = pathlib.Path(td) / "site"
+        run_capture(out)
+        html = (out / "about-us" / "index.html").read_text(encoding="utf-8")
+        assert "parked.example" not in html, "a link to the stale host survived the rewrite"
+        assert 'href="../"' in html, "the stale-host root link should resolve to the clone's root"
 
 
 def _tests() -> list:
