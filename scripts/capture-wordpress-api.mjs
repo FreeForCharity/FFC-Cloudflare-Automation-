@@ -1082,8 +1082,17 @@ export function neutralizeWaypointHidingInHtml(html) {
  */
 export function normalizeAccessibility(html) {
   const fixed = [];
-  let out = html.replace(/<meta\b[^>]*\bname\s*=\s*["']viewport["'][^>]*>/gi, (tag) => {
-    const content = /\bcontent\s*=\s*["']([^"']*)["']/i.exec(tag)?.[1];
+  // `(?:^|\s)` rather than `\b` before each attribute name, for the reason
+  // already written out on the `role` check below: `-` is a non-word
+  // character, so `\b` sits INSIDE `data-name` and `data-content`. Measured
+  // before this fix, on `<meta name="viewport" data-content="user-scalable=no"
+  // content="width=device-width">`: the read took `data-content` (leftmost
+  // match) as the viewport's directives, and the write then replaced
+  // `data-content` too, emitting `data-content=""` — an unrelated attribute
+  // silently emptied while the real viewport went unfiltered. Raised in review
+  // on #1239 for the mirroring assertion in test_705; the pass had it too.
+  let out = html.replace(/<meta(?:\s[^>]*)?\sname\s*=\s*["']viewport["'][^>]*>/gi, (tag) => {
+    const content = /(?:^|\s)content\s*=\s*["']([^"']*)["']/i.exec(tag)?.[1];
     if (!content) return tag;
     const kept = content
       .split(',')
@@ -1098,9 +1107,9 @@ export function normalizeAccessibility(html) {
       });
     if (kept.length === content.split(',').length) return tag;
     fixed.push('viewport');
-    return tag.replace(/\bcontent\s*=\s*["'][^"']*["']/i, `content="${kept.join(', ')}"`);
+    return tag.replace(/(^|\s)content\s*=\s*["'][^"']*["']/i, `$1content="${kept.join(', ')}"`);
   });
-  out = out.replace(/<div\b([^>]*\bid\s*=\s*["']main-content["'][^>]*)>/i, (tag, attrs) => {
+  out = out.replace(/<div((?:\s[^>]*)?\sid\s*=\s*["']main-content["'][^>]*)>/i, (tag, attrs) => {
     // `\brole` is not enough: `-` is a non-word character, so `\b` sits inside
     // `data-role` and the test matches it. A theme that puts `data-role` on the
     // main wrapper would silently lose its landmark — the check would report
@@ -2176,6 +2185,46 @@ function selfTest() {
     'a non-viewport meta is untouched',
     normalizeAccessibility('<meta name="description" content="user-scalable=0">').fixed,
     [],
+  );
+  // The same `\b`-inside-a-hyphenated-attribute trap the `data-role` case
+  // below documents, on the meta side. Both were live: measured before the
+  // fix, `data-name="viewport"` was rewritten as though it were the viewport
+  // tag, and — worse — a real viewport tag carrying `data-content` had that
+  // attribute read as its directives and then OVERWRITTEN with the filtered
+  // value, emitting `data-content=""` while the actual viewport went
+  // unfiltered. An unrelated attribute silently emptied is a fidelity defect,
+  // not a cosmetic one. Raised in review on #1239 against the mirroring
+  // assertion in test_705; the pass had it too.
+  eq(
+    'a data-name attribute does not masquerade as the viewport meta',
+    normalizeAccessibility(
+      '<meta data-name="viewport" content="width=device-width, user-scalable=no">',
+    ).fixed,
+    [],
+  );
+  eq(
+    'a data-content attribute is neither read as nor overwritten by the filter',
+    normalizeAccessibility(
+      '<meta name="viewport" data-content="keep-me" content="width=device-width, user-scalable=no">',
+    ).html,
+    '<meta name="viewport" data-content="keep-me" content="width=device-width">',
+  );
+  // The pass advertises itself as case- and whitespace-insensitive (`gi`, and
+  // `\s*` around each `=`). Asserted rather than assumed, because the smoke
+  // test that reads this output was written case-SENSITIVE and would have
+  // failed on correct markup.
+  eq(
+    'an uppercase viewport tag is filtered too',
+    normalizeAccessibility('<META NAME="viewport" CONTENT="width=device-width, user-scalable=no">')
+      .fixed,
+    ['viewport'],
+  );
+  eq(
+    'spaces around the attribute equals signs do not hide the tag',
+    normalizeAccessibility(
+      '<meta name = "viewport" content = "width=device-width, maximum-scale=1">',
+    ).fixed,
+    ['viewport'],
   );
   eq(
     'the main wrapper gains a landmark role',

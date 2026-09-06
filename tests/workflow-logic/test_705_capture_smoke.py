@@ -212,9 +212,18 @@ def test_the_cms_accessibility_defects_are_corrected() -> None:
         # deliberately keeps, because removing them would be its own defect.
         # Raised in review on #1239: as first written this passed only because
         # the fixture happens to use the restrictive form.
-        tag = re.search(r"<meta[^>]*name=[\"']viewport[\"'][^>]*>", html)
+        #
+        # Read the tag the way `normalizeAccessibility()` writes it, not the way
+        # this fixture happens to spell it. That pass matches
+        # `/<meta\b[^>]*\bname\s*=\s*["']viewport["'][^>]*>/gi`, so it handles
+        # `<META NAME=...>` and spaces around the `=`; these assertions did not,
+        # and would have reported "the viewport meta should still be present"
+        # about output that was in fact correct. Measured: of `<meta name=`,
+        # `<META NAME=`, `<meta Name=` and `<meta name = `, the case-sensitive
+        # form found only the first. Also raised in review on #1239.
+        tag = re.search(r"<meta\b[^>]*\bname\s*=\s*[\"']viewport[\"'][^>]*>", html, re.I)
         assert tag, "the viewport meta should still be present"
-        content = re.search(r"content=[\"']([^\"']*)[\"']", tag.group(0))
+        content = re.search(r"\bcontent\s*=\s*[\"']([^\"']*)[\"']", tag.group(0), re.I)
         assert content, tag.group(0)
         parts = [p.strip() for p in content.group(1).split(",")]
 
@@ -224,7 +233,12 @@ def test_the_cms_accessibility_defects_are_corrected() -> None:
             if cap:
                 assert float(cap.group(1)) >= 5, f"a cap under 5x is a restriction: {p}"
         assert "width=device-width" in parts, parts
-        assert 'role="main"' in html, "a screen reader needs a skip-to-content target"
+        # Same reason, one line down: the pass only INJECTS `role="main"` when
+        # the wrapper has no role of its own, so on a page that already carried
+        # `ROLE='main'` this substring test fails on a landmark that is present.
+        assert re.search(
+            r"\brole\s*=\s*[\"']main[\"']", html, re.I
+        ), "a screen reader needs a skip-to-content target"
 
 
 def test_a_page_link_to_itself_is_brought_home_too() -> None:
