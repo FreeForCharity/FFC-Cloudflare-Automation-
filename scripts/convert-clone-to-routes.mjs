@@ -218,8 +218,18 @@ function main() {
   // carrying the FFC template's identity it would instead turn
   // `About Us | Charity | Free For Charity` into `About Us | Free For Charity`
   // — deleting the charity's name from all 587 titles to leave only its
-  // sponsor's. Duplicated branding is untidy; losing the charity's name is a
-  // regression, so the untidy one is the safe side to fail to.
+  // sponsor's.
+  //
+  // Keeping the suffix is therefore right, but it is only half the fix, and
+  // the first version of this comment stopped here and called the leftover
+  // "untidy". It is not: measured on the vpmin.org conversion, 595 of 596
+  // exported pages rendered `… | Viewpoint Ministries International | Free For
+  // Charity` — the sponsor's brand on every one of the charity's pages, and
+  // titles up to 171 characters against Google's ~60. So the un-rebranded
+  // branch ALSO emits `title: { absolute }` (see `routeSource`), which
+  // suppresses the template rather than fighting it, and the page reproduces
+  // the title the source site served. Raised on FFC-EX-vpmin.org#27, where it
+  // was reported as double branding on 4 pages.
   const configuredName = readSiteConfigName(repo);
   const rebranded =
     detectedSuffix &&
@@ -390,7 +400,7 @@ function main() {
       write(join(repo, 'src', 'clone-content', `${slug || 'index'}.html`), fragment);
       write(
         join(repo, 'src', 'app', slug, 'page.tsx'),
-        routeSource({ slug, title, description, wrapperClass }),
+        routeSource({ slug, title, description, wrapperClass, absoluteTitle: !rebranded }),
       );
     }
     tally.pages += 1;
@@ -464,7 +474,8 @@ function main() {
       `  ->  ${
         titleSuffix
           ? 'stripped (siteConfig.name matches; the layout re-appends it)'
-          : `KEPT (siteConfig.name is ${JSON.stringify(configuredName)}, so stripping would leave only that)`
+          : `KEPT, and the layout template suppressed with title.absolute ` +
+            `(siteConfig.name is ${JSON.stringify(configuredName)}, which is not this site's brand)`
       }`,
   );
   console.log(`slug collisions       ${collisions.length}`);
