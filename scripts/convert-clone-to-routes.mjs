@@ -45,7 +45,7 @@ import {
   existsSync,
   statSync,
 } from 'node:fs';
-import { join, dirname, relative, resolve } from 'node:path';
+import { join, dirname, relative, resolve, sep } from 'node:path';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -697,18 +697,34 @@ function makeAssetResolver(publicDir, assetsDirName) {
     hosts = [];
   }
   return (relPath) => {
-    // A traversal segment would let a reference reach outside the assets tree.
-    if (relPath.split('/').includes('..')) return null;
-    const decoded = safeDecode(relPath);
     for (const host of hosts) {
-      for (const candidate of new Set([relPath, decoded])) {
-        if (existsSync(join(publicDir, assetsDirName, host, candidate))) {
-          return `%%BASE%%/${assetsDirName}/${host}/${candidate}`;
-        }
+      const hostRoot = join(publicDir, assetsDirName, host);
+      for (const candidate of new Set([relPath, safeDecode(relPath)])) {
+        const full = join(hostRoot, candidate);
+        // Containment, not a blacklist. The first version rejected a literal
+        // `..` segment and then ALSO tried the percent-decoded form without
+        // re-checking it — so `wp-content/%2e%2e/%2e%2e/etc/passwd` passed the
+        // guard, decoded to `../../etc/passwd` and resolved outside the assets
+        // tree. Comparing the resolved path against the resolved root cannot be
+        // stepped around by an encoding the check did not anticipate.
+        if (!isInside(hostRoot, full)) continue;
+        if (!existsSync(full)) continue;
+        // Emit the path relative to the host root rather than the candidate as
+        // written: a reference that stays inside but spells itself `a/../b`
+        // would otherwise put `../` into the published URL.
+        const clean = relative(hostRoot, full).split(sep).join('/');
+        return `%%BASE%%/${assetsDirName}/${host}/${clean}`;
       }
     }
     return null;
   };
+}
+
+/** True when `candidate` resolves to `root` itself or something beneath it. */
+function isInside(root, candidate) {
+  const rootResolved = resolve(root);
+  const target = resolve(candidate);
+  return target === rootResolved || target.startsWith(rootResolved + sep);
 }
 
 /** decodeURIComponent that returns the input rather than throwing on bad input. */
@@ -971,6 +987,55 @@ function selfTest() {
     ]);
     eq('the front page keeps its own shape', lh.urls[0], 'http://localhost/index.html');
     eq('a second run is a no-op', retargetLighthouseUrls(dir, ['about-us']).changed, false);
+
+    // --- the asset resolver cannot be walked out of ----------------------
+    // Verified against a real filesystem: a resolver that only rejects a
+    // LITERAL `..` still decodes `%2e%2e` afterwards, and `join` then escapes
+    // the assets tree — measured at /repo/public/etc/passwd before this.
+    mkdirSync(join(dir, 'public', '_ffc-assets', 'site.org', 'wp-content'), { recursive: true });
+    write(join(dir, 'public', '_ffc-assets', 'site.org', 'wp-content', 'a.pdf'), 'x');
+    write(join(dir, 'public', 'secret.txt'), 'not an asset');
+    const resolveAsset = makeAssetResolver(join(dir, 'public'), '_ffc-assets');
+
+    eq(
+      'a captured file resolves to its token path',
+      resolveAsset('wp-content/a.pdf'),
+      '%%BASE%%/_ffc-assets/site.org/wp-content/a.pdf',
+    );
+    eq(
+      'a file that was never captured resolves to nothing',
+      resolveAsset('wp-content/nope.pdf'),
+      null,
+    );
+    // Depth 3, because that is what actually reaches public/ from
+    // _ffc-assets/site.org/wp-content. The first draft of these cases used 2
+    // and passed against the OLD implementation too — proving nothing. The
+    // old resolver at depth 3 returns
+    // "%%BASE%%/_ffc-assets/site.org/wp-content/../../../secret.txt".
+    eq(
+      'a literal traversal cannot reach outside the assets tree',
+      resolveAsset('wp-content/../../../secret.txt'),
+      null,
+    );
+    // The gap Copilot found: the raw form has no `..`, so a blacklist passes
+    // it, and only the decoded form escapes.
+    eq(
+      'a percent-encoded traversal cannot either',
+      resolveAsset('wp-content/%2e%2e/%2e%2e/%2e%2e/secret.txt'),
+      null,
+    );
+    eq(
+      'nor a mixed-case percent-encoded one',
+      resolveAsset('wp-content/%2E%2E/%2E%2E/%2E%2E/secret.txt'),
+      null,
+    );
+    // Inside the tree but spelled with a dot segment: allowed, and normalised
+    // so the published URL never carries `../`.
+    eq(
+      'a dotted path that stays inside is normalised, not echoed',
+      resolveAsset('wp-content/../wp-content/a.pdf'),
+      '%%BASE%%/_ffc-assets/site.org/wp-content/a.pdf',
+    );
 
     // --- inline styles get the same treatment as the linked ones -------
     const styled = transformInlineStyles('<style>body.single h1{color:#fff}</style>');
