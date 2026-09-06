@@ -57,11 +57,23 @@
     `cd` persists, the edit did not care, and `.` resolved to a directory whose only Markdown was an
     already-clean README. Measured: run from that subdirectory the invocation emits a
     **byte-identical** success line to a full-repo pass, so nothing in the output distinguishes "400
-    files clean" from "you checked the wrong subtree". Name explicit paths, or anchor it:
+    files clean" from "you checked the wrong subtree". **Fix the cwd, not the argument** — `cd` to
+    the root and run CI's own command:
 
     ```bash
-    npx --yes prettier@3.8.1 --check "$(git rev-parse --show-toplevel)" --ignore-unknown
+    ( cd "$(git rev-parse --show-toplevel)" && npx --yes prettier@3.8.1 --check . --ignore-unknown )
     ```
+
+    **Do NOT pass the root as the PATH argument instead** — the obvious one-liner
+    (`prettier --check "$(git rev-parse --show-toplevel)"`) is wrong, and this note shipped it wrong
+    for one commit before it was measured. `.prettierignore` patterns are resolved against the
+    **cwd**, not against the target path, so from a subdirectory the ignore file stops applying:
+    measured from `tests/workflow-logic`, that form reports **42 files** needing formatting — 31
+    under `whmcs/`, 7 under `assets/`, the rest scattered — every one of them inside a path
+    `.prettierignore` lists and CI considers clean. The `cd` form on the same tree exits 0. So the
+    two spellings fail in opposite directions from the same wrong cwd: `.` under-reports silently (a
+    clean-looking pass over the wrong subtree), an absolute path over-reports loudly (42 phantom
+    failures). The second is the safer error and still costs a session chasing them.
 
     Not a ledger row: `docs/lessons-ledger.md` had 1,051 bytes of headroom under the 1 MiB
     large-blob guard when this was found, and the row that would have recorded it is what pushed the

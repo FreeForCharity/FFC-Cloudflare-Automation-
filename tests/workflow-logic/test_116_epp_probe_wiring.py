@@ -599,6 +599,15 @@ def test_an_unset_domain_fails_closed_and_says_so():
     out, _, rc = _run(_rendered(step["run"]), **{TOKEN_VAR: FAKE_TOKEN})
     assert rc == 1, f"an unset domain must fail closed, got rc={rc}: {out.strip()[:400]}"
     assert "::error::IN_DOMAIN is empty" in out
+    # Same check the empty case makes, for the same reason: rc and the message
+    # together say the guard SPOKE, not that the call was actually stopped. Only
+    # the stub's own marker says that. Binding precedes the script body, so a
+    # callee that started and refused the argument also prints nothing here — the
+    # claim is "the callee body never ran", and the `::error::` assertion above is
+    # what separates the guard refusing from the binder refusing.
+    assert "CALLED" not in out, (
+        f"the callee was invoked despite the unset guard. Output: {out.strip()[:400]}"
+    )
 
 
 def test_without_the_guard_a_blank_fails_loudly():
