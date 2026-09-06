@@ -1,0 +1,1084 @@
+#!/usr/bin/env node
+/**
+ * convert-clone-to-routes.mjs — turn a captured static clone into an FFC-EX
+ * repository with real Next.js routes.
+ *
+ * `scripts/integrate-clone-into-nextjs.mjs` drops the capture into `public/`,
+ * which deploys — `output: 'export'` copies that directory verbatim — and
+ * leaves the repo in a shape no production FFC-EX site uses. There are no app
+ * routes, so the template's per-page canonicals, its `<main>` landmark, its
+ * skip-to-content target and its one-h1-per-page build check have nothing to
+ * act on; the charity's pages inherit none of the FFC chrome; and every page
+ * the capture recorded is a file rather than a route, invisible to the whole
+ * toolchain that a Next.js site is checked with.
+ *
+ * This script produces the shape measured on FFC-EX-catnipandcattitude.org,
+ * itself a WordPress clone that was converted rather than hand-written:
+ *
+ *   src/clone-content/<slug>.html   the page markup, with %%BASE%% tokens
+ *   src/app/<slug>/page.tsx         title, description, canonical
+ *   src/lib/clone-content.ts        the token substitution
+ *   src/components/{ffc-footer,clone-enhance}/
+ *   public/                         assets only — zero HTML
+ *
+ * and on the way through it applies the corrections the capture cannot make
+ * from a single page in isolation: exactly one h1 per page with no skipped
+ * level (and the Divi per-module CSS retargeted to match), a description on
+ * every page that has words of its own to quote, an alt attribute on every
+ * image, and an accessible name on every link that wraps only a decorative one.
+ *
+ * Every decision lives in scripts/clone-to-routes-lib.mjs, which is pure and
+ * self-tested (`node scripts/clone-to-routes-lib.mjs --self-test`); this file
+ * is the filesystem around it.
+ *
+ * Usage:
+ *   node scripts/convert-clone-to-routes.mjs --repo <path-to-FFC-EX-repo> \
+ *        [--site-name "Charity Name"] [--assets-dir _ffc-assets] [--dry-run]
+ */
+import {
+  readFileSync,
+  writeFileSync,
+  readdirSync,
+  mkdirSync,
+  rmSync,
+  renameSync,
+  existsSync,
+  statSync,
+} from 'node:fs';
+import { join, dirname, relative, resolve, sep } from 'node:path';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+
+import {
+  slugForLocalPath,
+  sanitizeSlug,
+  normalizePercentEncoding,
+  extractBody,
+  extractHead,
+  extractTitle,
+  detectTitleSuffix,
+  stripTitleSuffix,
+  extractMetaDescription,
+  deriveDescription,
+  collectHeadings,
+  planHeadingLevels,
+  applyHeadingLevels,
+  mirrorHeadingSelectors,
+  scopeCloneCss,
+  fragmentHead,
+  stripLayoutDuplicates,
+  removeDeadConsentUi,
+  ensureImageAlt,
+  nameAnonymousLinks,
+  nameGenericLinks,
+  titleIframes,
+  tokenizeAssetPaths,
+  tokenizePageLinks,
+  localizeRootAssetRefs,
+  unlinkDeadPageLinks,
+  dropMissingStylesheets,
+  routeSource,
+} from './clone-to-routes-lib.mjs';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const ASSETS = join(HERE, '..', 'assets');
+const WRAPPER_CLASS = 'ffc-clone';
+
+function arg(name, fallback = null) {
+  const i = process.argv.indexOf(`--${name}`);
+  return i === -1 || i === process.argv.length - 1 ? fallback : process.argv[i + 1];
+}
+const FLAG = (name) => process.argv.includes(`--${name}`);
+
+/** Every file under `dir`, as paths relative to it, with forward slashes. */
+function walk(dir, base = dir) {
+  const out = [];
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const e of entries) {
+    const full = join(dir, e.name);
+    if (e.isDirectory()) out.push(...walk(full, base));
+    else if (e.isFile()) out.push(relative(base, full).split('\\').join('/'));
+  }
+  return out;
+}
+
+function write(path, content) {
+  mkdirSync(dirname(path), { recursive: true });
+  // newline is pinned so a Windows host and a Linux runner commit the same
+  // bytes; the FFC-EX repos check formatting in CI and would disagree otherwise.
+  writeFileSync(path, content, { encoding: 'utf8' });
+}
+
+function copyTemplate(name, dest) {
+  write(dest, readFileSync(join(ASSETS, name), 'utf8'));
+}
+
+/**
+ * Assign each captured page a unique route slug.
+ *
+ * Two captured paths can name one page, and two can land on one slug, and the
+ * right answer is different for each.
+ *
+ * **Same URL.** RFC 3986 makes the hex digits of a percent-escape
+ * case-insensitive, so this capture's `…-the-us%EF%BF%BC/` and
+ * `…-the-us%ef%bf%bc/` are one address that the source's sitemap advertises
+ * twice. They are COLLAPSED: both spellings route to one page. Publishing them
+ * separately would put the charity's article at two URLs with identical text —
+ * a duplicate-content penalty inherited from a defect in the source, not chosen
+ * by anyone.
+ *
+ * **Different URLs that sanitize alike.** `sanitizeSlug` is lossy on purpose
+ * (it strips characters a directory name and a URL cannot both carry), so two
+ * genuinely different pages can want the same slug. Whoever sorts first keeps
+ * the clean one and the rest are SUFFIXED, never dropped: a page silently
+ * missing from a migration is the failure mode nobody notices.
+ */
+export function assignSlugs(localPaths) {
+  const taken = new Set();
+  const assigned = [];
+  const collisions = [];
+  const duplicates = [];
+  const byUrl = new Map();
+  for (const localPath of [...localPaths].sort()) {
+    const raw = slugForLocalPath(localPath);
+    if (raw === null) continue;
+
+    const canonical = normalizePercentEncoding(raw);
+    const already = byUrl.get(canonical);
+    if (already) {
+      duplicates.push({ localPath, raw, slug: already.slug, sameAs: already.raw });
+      // Still an alias, so links written with either spelling reach the page.
+      already.aliases.push(raw);
+      continue;
+    }
+
+    // `sanitizeSlug` keeps only `[a-z0-9-]`, so a permalink written entirely in
+    // a non-Latin script (`/новости/`) or in punctuation (`/---/`) collapses to
+    // the EMPTY string — which is the front page's slug. Measured before this
+    // guard: `['новости/index.html', 'index.html']` assigned `['', '-2']`, so
+    // a random post became the site root and the charity's actual front page
+    // was published at `/-2/`. A leading-hyphen folder also fails the repo's
+    // kebab-case drift rule, which is the symptom that would have been noticed
+    // first and the least of it.
+    //
+    // Only the root may hold the empty slug, and the root is the one entry
+    // whose `raw` is itself empty.
+    const base = raw ? sanitizeSlug(raw) || 'page' : '';
+    let slug = base;
+    let n = 2;
+    while (taken.has(slug)) {
+      slug = `${base}-${n}`;
+      n += 1;
+    }
+    if (slug !== base) collisions.push({ localPath, base, slug });
+    taken.add(slug);
+    const entry = { localPath, raw, slug, aliases: [] };
+    byUrl.set(canonical, entry);
+    assigned.push(entry);
+  }
+  return { assigned, collisions, duplicates };
+}
+
+function main() {
+  const repo = resolve(arg('repo') ?? process.cwd());
+  const assetsDir = arg('assets-dir', '_ffc-assets');
+  const dryRun = FLAG('dry-run');
+  const publicDir = join(repo, 'public');
+
+  const report = readJsonIfPresent(join(publicDir, 'wp-capture-report.json'));
+  const siteName = arg('site-name') ?? report?.domain ?? '';
+
+  const files = walk(publicDir);
+  const htmlFiles = files.filter((f) => f.endsWith('/index.html') || f === 'index.html');
+  if (!htmlFiles.length) {
+    console.error(`No captured pages under ${publicDir} — nothing to convert.`);
+    process.exit(1);
+  }
+
+  const resolveCapturedAsset = makeAssetResolver(publicDir, assetsDir);
+
+  // Read every captured title before emitting any route: the brand suffix is a
+  // property of the SITE, so it can only be derived once all of them are in
+  // hand. Cheap — the documents are read again below, from the page cache.
+  const capturedTitles = htmlFiles.map((f) =>
+    extractTitle(readFileSync(join(publicDir, f), 'utf8')),
+  );
+  const detectedSuffix = detectTitleSuffix(capturedTitles);
+  // Strip the suffix ONLY when the layout is going to put the same name back.
+  //
+  // `title.template` appends `siteConfig.name`, so on a repo that has been
+  // rebranded to the charity, stripping turns
+  // `About Us | Charity | Charity` into `About Us | Charity`. On a repo still
+  // carrying the FFC template's identity it would instead turn
+  // `About Us | Charity | Free For Charity` into `About Us | Free For Charity`
+  // — deleting the charity's name from all 587 titles to leave only its
+  // sponsor's.
+  //
+  // Keeping the suffix is therefore right, but it is only half the fix, and
+  // the first version of this comment stopped here and called the leftover
+  // "untidy". It is not: measured on the vpmin.org conversion, 595 of 596
+  // exported pages rendered `… | Viewpoint Ministries International | Free For
+  // Charity` — the sponsor's brand on every one of the charity's pages, and
+  // titles up to 171 characters against Google's ~60. So the un-rebranded
+  // branch ALSO emits `title: { absolute }` (see `routeSource`), which
+  // suppresses the template rather than fighting it, and the page reproduces
+  // the title the source site served. Raised on FFC-EX-vpmin.org#27, where it
+  // was reported as double branding on 4 pages.
+  const configuredName = readSiteConfigName(repo);
+  const rebranded =
+    detectedSuffix &&
+    configuredName &&
+    detectedSuffix.trim().toLowerCase() === configuredName.trim().toLowerCase();
+  const titleSuffix = rebranded ? detectedSuffix : null;
+
+  // The FFC template ships `pageMetadata()`, which already handles Next's
+  // shallow metadata merge (per-page og/twitter that keep the site's image and
+  // site_name). Prefer it when the repo has it; a repo without it gets the
+  // inline form. Checked rather than assumed, because these routes are written
+  // into whatever repo the workflow is pointed at.
+  const pageMetadataHelper = existsSync(join(repo, 'src', 'lib', 'page-metadata.ts'));
+
+  const { assigned, collisions, duplicates } = assignSlugs(htmlFiles);
+  // Link rewriting is keyed on the path the capture actually wrote, because
+  // that is what the markup references; the sanitized slug is where the route
+  // ends up. Both are needed, and conflating them silently drops every link
+  // whose target got sanitized. Aliases are in here too, so a link written with
+  // the other spelling of a collapsed duplicate still resolves.
+  const rawToSlug = new Map();
+  for (const a of assigned) {
+    rawToSlug.set(a.raw, a.slug);
+    for (const alias of a.aliases) rawToSlug.set(alias, a.slug);
+  }
+  const routeSlugs = new Set(assigned.map((a) => a.slug));
+
+  const frameHosts = new Set();
+  const deadTargets = new Map();
+  const shape = {};
+  // A target is live if it is a captured page (by the path the markup names or
+  // by the slug it became) or a file that ships in public/.
+  const shippedFiles = new Set(files);
+  const isLiveTarget = (target) =>
+    rawToSlug.has(target) ||
+    routeSlugs.has(target) ||
+    shippedFiles.has(target) ||
+    shippedFiles.has(`${target}/index.html`);
+
+  const tally = {
+    pages: 0,
+    h1Fixed: 0,
+    levelsChanged: 0,
+    descriptionsDerived: 0,
+    descriptionsMissing: 0,
+    altsAdded: 0,
+    linksNamed: 0,
+    genericLinksNamed: 0,
+    iframesTitled: 0,
+    scriptsRemoved: 0,
+    consentUiRemoved: 0,
+    consentUiBytes: 0,
+    headDropped: 0,
+    assetRefs: 0,
+    assetRefsRelinked: 0,
+    deadLinksUnlinked: 0,
+    inlineStyles: 0,
+    missingSheetsDropped: 0,
+    pageRefs: 0,
+  };
+
+  for (const { localPath, slug } of assigned) {
+    const html = readFileSync(join(publicDir, localPath), 'utf8');
+    const { body, bodyClass } = extractBody(html);
+    const head = extractHead(html);
+
+    // 1. Headings: exactly one h1, no skipped level, CSS retargeted to match.
+    const headings = collectHeadings(body);
+    const planned = planHeadingLevels(headings);
+    const beforeH1 = headings.filter((h) => h.level === 1).length;
+    const retagged = applyHeadingLevels(body, planned);
+    let out = retagged.html;
+    tally.levelsChanged += retagged.changes.length;
+    if (beforeH1 !== 1) tally.h1Fixed += 1;
+
+    // 2. Accessibility repairs the capture cannot make per-page.
+    const alt = ensureImageAlt(out);
+    out = alt.html;
+    tally.altsAdded += alt.added;
+    const named = nameAnonymousLinks(out, siteName);
+    out = named.html;
+    tally.linksNamed += named.named;
+    const generic = nameGenericLinks(out);
+    out = generic.html;
+    tally.genericLinksNamed += generic.named;
+    const framed = titleIframes(out);
+    out = framed.html;
+    tally.iframesTitled += framed.titled;
+    // Every external frame host has to be in the CSP's `frame-src`, in BOTH the
+    // layout's meta tag and public/_headers, or the charity's own podcast and
+    // video embeds are refused by the browser. Reported rather than edited: the
+    // CSP is the repo's security posture, and widening it is a reviewed change.
+    for (const m of out.matchAll(/<iframe\b[^>]*\bsrc="https?:\/\/([^/"]+)/gi)) {
+      frameHosts.add(m[1].toLowerCase());
+    }
+
+    // 3. Remove what the root layout already provides, and what the source
+    //    site left behind that can no longer work.
+    const stripped = stripLayoutDuplicates(out);
+    out = stripped.html;
+    tally.scriptsRemoved += stripped.removedScripts;
+    const consent = removeDeadConsentUi(out);
+    out = consent.html;
+    tally.consentUiRemoved += consent.removed;
+    tally.consentUiBytes += consent.bytes;
+
+    // 4. Paths: page-relative in a file, base-relative in a route.
+    const assetsTok = tokenizeAssetPaths(out, assetsDir);
+    out = assetsTok.html;
+    tally.assetRefs += assetsTok.rewritten;
+    const linksTok = tokenizePageLinks(out, rawToSlug);
+    out = linksTok.html;
+    tally.pageRefs += linksTok.rewritten;
+    // A `wp-content/…` reference the capture downloaded but never rewrote —
+    // WordPress links an upload with a plain <a href>, which is neither a page
+    // nor an asset the capture's rewriter sees.
+    const relinked = localizeRootAssetRefs(out, resolveCapturedAsset);
+    out = relinked.html;
+    tally.assetRefsRelinked += relinked.rewritten;
+    // A relative link left after tokenization points at a page this migration
+    // does not have — a WordPress author archive, archive pagination.
+    //
+    // The predicate is a real lookup, NOT "anything still relative is dead".
+    // That shortcut was written first and was wrong: links carrying a fragment
+    // or a query were not tokenized at the time, so 351 links to live pages
+    // read as dead and were unlinked. The tokenizer now carries those across,
+    // and this asks rather than assumes — the two together, because either
+    // alone still silently breaks working links.
+    const deadLinks = unlinkDeadPageLinks(out, isLiveTarget);
+    out = deadLinks.html;
+    tally.deadLinksUnlinked += deadLinks.unlinked;
+    for (const [target, n] of deadLinks.dead) {
+      deadTargets.set(target, (deadTargets.get(target) ?? 0) + n);
+    }
+
+    // 5. The styles the fragment cannot render without.
+    const fh = fragmentHead(head);
+    tally.headDropped += fh.dropped;
+    const fhTok = tokenizeAssetPaths(fh.html, assetsDir);
+    tally.assetRefs += fhTok.rewritten;
+    // Divi's per-taxonomy stylesheet is generated at request time, so for the
+    // archive pages it was never fetched for, the link only produces a 404.
+    const sheets = dropMissingStylesheets(fhTok.html, (t) => resolveCapturedAsset(t) !== null);
+    tally.missingSheetsDropped += sheets.dropped;
+    // Divi splits its presentation between linked stylesheets and a dozen
+    // inline <style> blocks, and both halves have to be treated the same way.
+    // Scoping only the files would leave the critical inline CSS — which is the
+    // half that renders before anything else — still global.
+    const fragmentCss = transformInlineStyles(sheets.html);
+    tally.inlineStyles += fragmentCss.blocks;
+    out = transformInlineStyles(out).html;
+
+    // 6. Metadata.
+    // The layout carries `title.template` (`%s | <site name>`), so a captured
+    // title that still ends in the brand renders it twice.
+    //
+    // The front page is the exception, and Next.js is the reason: a template
+    // applies to CHILD segments, and `app/page.tsx` shares the root segment
+    // with `app/layout.tsx`, so nothing appends the brand there. Stripping it
+    // leaves the site's front page titled `Home` — measured, and a worse title
+    // than the one the capture came with.
+    const capturedTitle = extractTitle(html);
+    const title =
+      (slug ? stripTitleSuffix(capturedTitle, titleSuffix) : capturedTitle) || slug || siteName;
+    let description = extractMetaDescription(html);
+    if (!description) {
+      description = deriveDescription(body);
+      if (description) tally.descriptionsDerived += 1;
+      else tally.descriptionsMissing += 1;
+    }
+
+    const fragment = `${fragmentCss.html}\n${out}`.trim() + '\n';
+    const wrapperClass = [WRAPPER_CLASS, bodyClass].filter(Boolean).join(' ');
+    if (!dryRun) {
+      write(join(repo, 'src', 'clone-content', `${slug || 'index'}.html`), fragment);
+      write(
+        join(repo, 'src', 'app', slug, 'page.tsx'),
+        routeSource({
+          slug,
+          title,
+          description,
+          wrapperClass,
+          absoluteTitle: !rebranded,
+          pageMetadataHelper,
+        }),
+      );
+    }
+    tally.pages += 1;
+  }
+
+  // 7. The CSS half, applied to every stylesheet the capture downloaded: each
+  //    heading selector gains a twin naming the marker class the retag left on
+  //    the element, and every selector is then confined to the wrapper so the
+  //    charity's theme cannot restyle the FFC components that now share the
+  //    document with it.
+  let cssFiles = 0;
+  let headingRules = 0;
+  let bodyRules = 0;
+  for (const f of files) {
+    if (!f.endsWith('.css')) continue;
+    const path = join(publicDir, f);
+    const css = readFileSync(path, 'utf8');
+    const mirrored = mirrorHeadingSelectors(css);
+    const scopedCss = scopeCloneCss(mirrored.css, WRAPPER_CLASS);
+    if (mirrored.mirrored || scopedCss.scoped) {
+      cssFiles += 1;
+      headingRules += mirrored.mirrored;
+      bodyRules += scopedCss.scoped;
+      if (!dryRun) writeFileSync(path, scopedCss.css, { encoding: 'utf8' });
+    }
+  }
+
+  // 8. Repo scaffolding: the pieces a route-shaped site needs and a
+  //    public/-shaped one did not.
+  if (!dryRun) {
+    copyTemplate('clone-content-lib.ts', join(repo, 'src', 'lib', 'clone-content.ts'));
+    copyTemplate(
+      'clone-enhance.tsx',
+      join(repo, 'src', 'components', 'clone-enhance', 'index.tsx'),
+    );
+    copyTemplate('ffc-footer.tsx', join(repo, 'src', 'components', 'ffc-footer', 'index.tsx'));
+    copyTemplate('clone-routes-sitemap.ts', join(repo, 'src', 'app', 'sitemap.ts'));
+    // The template's sitemap test diffs the sitemap against a hand-maintained
+    // array; leaving it in place would fail against a derived one. The property
+    // it protected is kept and retargeted — see the template's own header.
+    copyTemplate('clone-routes-sitemap.test.ts', join(repo, '__tests__', 'app', 'sitemap.test.ts'));
+    appendFooterStyles(join(repo, 'src', 'app', 'globals.css'));
+    ignoreCloneContent(join(repo, '.prettierignore'));
+    shape.templateRoutes = restoreTemplateRoutes(repo);
+    shape.trailingSlash = enableTrailingSlash(repo);
+    // Two converted pages so the audit covers the migration, not only the
+    // template's policy pages. The front page is already in every config.
+    shape.lighthouse = retargetLighthouseUrls(
+      repo,
+      assigned
+        .filter((a) => a.slug && !a.slug.includes('/'))
+        .slice(0, 2)
+        .map((a) => a.slug),
+    );
+
+    // 9. public/ holds assets only. Every page is a route now, and leaving the
+    //    HTML behind would publish two copies of the site at two URLs — the
+    //    duplicate-content defect, and the sitemap would describe only one.
+    for (const f of htmlFiles) rmSync(join(publicDir, f), { force: true });
+    pruneEmptyDirs(publicDir);
+    rmSync(join(publicDir, assetsDir, 'clone-enhance.js'), { force: true });
+  }
+
+  const remainingHtml = walk(publicDir).filter((f) => f.endsWith('.html'));
+
+  console.log('--- conversion ---------------------------------------------');
+  console.log(`site                  ${siteName || '(unknown)'}`);
+  console.log(`routes written        ${tally.pages}`);
+  console.log(
+    `brand suffix in captured titles  ${detectedSuffix ?? '(none detected)'}` +
+      `  ->  ${
+        titleSuffix
+          ? 'stripped (siteConfig.name matches; the layout re-appends it)'
+          : `KEPT, and the layout template suppressed with title.absolute ` +
+            `(siteConfig.name is ${JSON.stringify(configuredName)}, which is not this site's brand)`
+      }`,
+  );
+  console.log(`slug collisions       ${collisions.length}`);
+  for (const c of collisions) console.log(`  ${c.base} -> ${c.slug}  (${c.localPath})`);
+  console.log(`duplicate URLs collapsed  ${duplicates.length}`);
+  for (const d of duplicates) console.log(`  ${d.raw}  ==  ${d.sameAs}  -> /${d.slug}`);
+  console.log(`pages whose h1 count was wrong  ${tally.h1Fixed}`);
+  console.log(`headings retagged     ${tally.levelsChanged}`);
+  console.log(`descriptions derived  ${tally.descriptionsDerived}`);
+  console.log(`pages still without a description  ${tally.descriptionsMissing}`);
+  console.log(`alt attributes added  ${tally.altsAdded}`);
+  console.log(`links given a name    ${tally.linksNamed}`);
+  console.log(`"Read More" links given a destination  ${tally.genericLinksNamed}`);
+  console.log(`embeds given a title  ${tally.iframesTitled}`);
+  console.log(`external frame hosts (must be in the CSP frame-src)  ${frameHosts.size}`);
+  for (const h of [...frameHosts].sort()) console.log(`  https://${h}`);
+  console.log(`scripts removed from fragments  ${tally.scriptsRemoved}`);
+  console.log(
+    `dead consent banners removed  ${tally.consentUiRemoved}` +
+      `  (${(tally.consentUiBytes / 1024 / 1024).toFixed(1)} MB)`,
+  );
+  console.log(`head elements dropped (owned by Next)  ${tally.headDropped}`);
+  console.log(`inline <style> blocks scoped  ${tally.inlineStyles}`);
+  console.log(`stylesheet links dropped (file never captured)  ${tally.missingSheetsDropped}`);
+  console.log(`asset refs tokenized  ${tally.assetRefs}`);
+  console.log(`page links tokenized  ${tally.pageRefs}`);
+  console.log(`references repointed at the captured file  ${tally.assetRefsRelinked}`);
+  console.log(`links to pages the capture does not have, unlinked  ${tally.deadLinksUnlinked}`);
+  for (const [t, n] of [...deadTargets].sort((a, b) => b[1] - a[1]).slice(0, 8)) {
+    console.log(`  ${String(n).padStart(5)}  ${t}`);
+  }
+  console.log(
+    `stylesheets rewritten ${cssFiles}  (heading twins ${headingRules}, scoped ${bodyRules})`,
+  );
+  console.log(`HTML left in public/  ${remainingHtml.length}`);
+  if (shape.templateRoutes) {
+    console.log(`FFC template routes restored  ${shape.templateRoutes.restored.length}`);
+    for (const c of shape.templateRoutes.collided) {
+      console.log(`  NOT restored (a captured page owns this slug): ${c}`);
+    }
+  }
+  if (shape.trailingSlash) {
+    console.log(
+      `trailingSlash  ${shape.trailingSlash.changed ? 'enabled' : shape.trailingSlash.reason}`,
+    );
+  }
+  if (shape.lighthouse?.changed) {
+    console.log('Lighthouse URLs retargeted:');
+    for (const u of shape.lighthouse.urls) console.log(`  ${u}`);
+  }
+  if (dryRun) console.log('(dry run — nothing was written)');
+
+  // A page that reached no route, or an HTML file left where a second copy of
+  // the site would be published from, is a silent failure in the direction
+  // nobody checks. Fail rather than report it in a line that scrolls past.
+  // The whole conversion depends on `trailingSlash: true`: the captured pages
+  // link to each other with a trailing slash, so without it the migrated site's
+  // own navigation 404s. Reporting that and exiting 0 would hand back a
+  // "successful" conversion that does not work.
+  const ts = shape.trailingSlash;
+  if (!dryRun && ts && !ts.changed && ts.reason !== 'already set') {
+    console.error(
+      `could not set trailingSlash in next.config.ts (${ts.reason}); the converted` +
+        " site's own internal links would 404. Set `trailingSlash: true` and re-run.",
+    );
+    process.exit(1);
+  }
+
+  // Every captured file is either a route or a deliberately collapsed duplicate
+  // of one. Anything else means a page fell out of the migration silently.
+  if (tally.pages + duplicates.length !== htmlFiles.length) {
+    console.error(
+      `accounted for ${tally.pages} routes + ${duplicates.length} duplicates` +
+        ` of ${htmlFiles.length} captured pages`,
+    );
+    process.exit(1);
+  }
+  if (!dryRun && remainingHtml.length) {
+    console.error(`public/ still holds ${remainingHtml.length} HTML files`);
+    process.exit(1);
+  }
+}
+
+/** Apply the same two CSS transforms to every inline <style> block. */
+function transformInlineStyles(html) {
+  let blocks = 0;
+  const out = html.replace(/(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi, (whole, open, css, close) => {
+    blocks += 1;
+    const mirrored = mirrorHeadingSelectors(css);
+    return open + scopeCloneCss(mirrored.css, WRAPPER_CLASS).css + close;
+  });
+  return { html: out, blocks };
+}
+
+/**
+ * Bring back the FFC template routes the `public/`-shaped integration parked.
+ *
+ * `integrate-clone-into-nextjs.mjs` moves every template route into
+ * `_disabled_template_routes/` because the captured pages under `public/` would
+ * otherwise be shadowed by them. Once the capture IS the routes there is no
+ * collision left to avoid, and the parked routes are the FFC template features
+ * the site is supposed to keep — the privacy, cookie, terms, donation,
+ * vulnerability-disclosure and security-acknowledgements pages that the footer
+ * standard links to. Leaving them parked ships a footer of links to 404s.
+ *
+ * The template's own home page is the one exception: the charity's front page
+ * owns `/` now, so it is dropped rather than restored.
+ */
+function restoreTemplateRoutes(repo) {
+  const parked = join(repo, '_disabled_template_routes');
+  const restored = [];
+  const collided = [];
+  let entries;
+  try {
+    entries = readdirSync(parked, { withFileTypes: true });
+  } catch {
+    return { restored, collided };
+  }
+  for (const entry of entries) {
+    const from = join(parked, entry.name);
+    if (entry.isFile()) {
+      // page.tsx at the top level is the template home page.
+      rmSync(from, { force: true });
+      continue;
+    }
+    const to = join(repo, 'src', 'app', entry.name);
+    if (existsSync(to)) {
+      collided.push(entry.name);
+      continue;
+    }
+    renameSync(from, to);
+    restored.push(entry.name);
+  }
+  if (!readdirSync(parked).length) rmSync(parked, { recursive: true, force: true });
+  return { restored, collided };
+}
+
+/**
+ * Serve every route at the trailing-slash URL the source site used.
+ *
+ * WordPress served `/about-us/`, the captured markup links to `/about-us/`, and
+ * without this Next writes `about-us.html` and nothing answers at the slashed
+ * form — so the migrated site's own internal links 404, and so does every
+ * inbound link and search result pointing at the old URLs. It is the one
+ * next.config change the conversion requires.
+ */
+function enableTrailingSlash(repo) {
+  const path = join(repo, 'next.config.ts');
+  let source;
+  try {
+    source = readFileSync(path, 'utf8');
+  } catch {
+    return { changed: false, reason: 'no next.config.ts' };
+  }
+  if (/\btrailingSlash\s*:/.test(source)) return { changed: false, reason: 'already set' };
+  // Tolerant of how the line is written: either quote style, comma optional.
+  // The original anchor required single quotes AND a trailing comma, and
+  // matched 1 of those 4 formats — measured. The other three returned
+  // "changed: false" and the conversion carried on, producing a site whose
+  // own internal links 404. A formatting preference in the receiving repo is
+  // not a reason to ship that.
+  const anchor = /\n[ \t]*output:\s*['"]export['"][ \t]*,?/;
+  const found = anchor.exec(source);
+  if (!found) return { changed: false, reason: "no `output: 'export'` to anchor to" };
+  const line = found[0];
+  const withComma = line.endsWith(',') ? line : `${line},`;
+  const note =
+    '\n  // The source WordPress served every page at a trailing-slash URL, and the\n' +
+    '  // converted pages link to each other the same way. Without this the export\n' +
+    '  // writes `about-us.html` and `/about-us/` 404s on GitHub Pages — so this is\n' +
+    '  // not a style preference: it is what keeps the migrated site\u2019s own internal\n' +
+    '  // links working, and what keeps every inbound link and search result that\n' +
+    '  // points at the old URLs landing on the page it used to.\n' +
+    '  trailingSlash: true,';
+  write(path, source.replace(line, `${withComma}${note}`));
+  return { changed: true };
+}
+
+/**
+ * Point Lighthouse CI at URLs that exist, and at the migrated content.
+ *
+ * The template's `lighthouserc.json` audits `privacy-policy.html`; with
+ * trailing slashes that file is gone and lhci would audit 404s — whose
+ * accessibility and SEO assertions are error-level, so CI fails on the harness
+ * rather than the site. Two converted pages are added because auditing only the
+ * template's policy pages would leave the actual migration unmeasured.
+ */
+function retargetLighthouseUrls(repo, extraSlugs) {
+  const path = join(repo, 'lighthouserc.json');
+  let config;
+  let source;
+  try {
+    source = readFileSync(path, 'utf8');
+    config = JSON.parse(source);
+  } catch {
+    return { changed: false };
+  }
+  const urls = config?.ci?.collect?.url;
+  if (!Array.isArray(urls)) return { changed: false };
+  const slashed = urls.map((u) =>
+    u.replace(/\/([a-z0-9-]+)\.html$/i, (whole, slug) =>
+      slug === 'index' ? '/index.html' : `/${slug}/index.html`,
+    ),
+  );
+  for (const slug of extraSlugs) {
+    const url = `http://localhost/${slug}/index.html`;
+    if (!slashed.includes(url)) slashed.splice(1, 0, url);
+  }
+  if (slashed.join('\n') === urls.join('\n')) return { changed: false };
+  config.ci.collect.url = slashed;
+  write(path, `${JSON.stringify(config, null, 2)}\n`);
+  return { changed: true, urls: slashed };
+}
+
+/**
+ * The localized path for a source-relative asset reference, or null.
+ *
+ * The capture writes assets under `<assetsDir>/<host>/<original path>`, and a
+ * site can reference more than one host, so the lookup tries each host
+ * directory rather than assuming the site's own. Returns the `%%BASE%%` token
+ * form the fragments use, so a hit is usable verbatim.
+ */
+function makeAssetResolver(publicDir, assetsDirName) {
+  let hosts;
+  try {
+    hosts = readdirSync(join(publicDir, assetsDirName), { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+  } catch {
+    hosts = [];
+  }
+  return (relPath) => {
+    for (const host of hosts) {
+      const hostRoot = join(publicDir, assetsDirName, host);
+      for (const candidate of new Set([relPath, safeDecode(relPath)])) {
+        const full = join(hostRoot, candidate);
+        // Containment, not a blacklist. The first version rejected a literal
+        // `..` segment and then ALSO tried the percent-decoded form without
+        // re-checking it — so `wp-content/%2e%2e/%2e%2e/etc/passwd` passed the
+        // guard, decoded to `../../etc/passwd` and resolved outside the assets
+        // tree. Comparing the resolved path against the resolved root cannot be
+        // stepped around by an encoding the check did not anticipate.
+        if (!isInside(hostRoot, full)) continue;
+        if (!existsSync(full)) continue;
+        // Emit the path relative to the host root rather than the candidate as
+        // written: a reference that stays inside but spells itself `a/../b`
+        // would otherwise put `../` into the published URL.
+        const clean = relative(hostRoot, full).split(sep).join('/');
+        return `%%BASE%%/${assetsDirName}/${host}/${clean}`;
+      }
+    }
+    return null;
+  };
+}
+
+/** True when `candidate` resolves to `root` itself or something beneath it. */
+function isInside(root, candidate) {
+  const rootResolved = resolve(root);
+  const target = resolve(candidate);
+  return target === rootResolved || target.startsWith(rootResolved + sep);
+}
+
+/** decodeURIComponent that returns the input rather than throwing on bad input. */
+function safeDecode(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+/** `siteConfig.name` from the target repo, or null if it cannot be read. */
+function readSiteConfigName(repo) {
+  try {
+    const src = readFileSync(join(repo, 'src', 'lib', 'site.config.ts'), 'utf8');
+    // The first `name:` inside the exported object literal — the type
+    // declaration above it has no value to match.
+    return /^\s*name:\s*['"]([^'"]+)['"]/m.exec(src)?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function readJsonIfPresent(path) {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+const FOOTER_MARK = '/* --- FFC attribution footer (added by workflow 706)';
+function appendFooterStyles(globalsPath) {
+  let css = '';
+  try {
+    css = readFileSync(globalsPath, 'utf8');
+  } catch {
+    /* a repo without globals.css gets one holding just these rules */
+  }
+  if (css.includes(FOOTER_MARK)) return;
+  const add = readFileSync(join(ASSETS, 'ffc-footer.css'), 'utf8');
+  write(globalsPath, `${css.replace(/\s*$/, '')}\n\n${add}`);
+}
+
+const IGNORE_MARK = 'src/clone-content/';
+/**
+ * Keep Prettier out of the captured fragments.
+ *
+ * They are several hundred files of machine-generated markup, and reformatting
+ * them is not merely churn: Prettier reflows HTML, and inside the captured
+ * markup whitespace between inline elements is rendered text. `public/` is
+ * already excluded for the same reason; the conversion moves the pages, so the
+ * exclusion has to move with them.
+ */
+function ignoreCloneContent(path) {
+  let text = '';
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch {
+    /* a repo without one gets a file holding just this rule */
+  }
+  if (text.includes(IGNORE_MARK)) return;
+  write(
+    path,
+    `${text.replace(/\s*$/, '')}\n\n# Captured page markup (generated, whitespace-sensitive)\n${IGNORE_MARK}\n`,
+  );
+}
+
+function pruneEmptyDirs(dir) {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return true;
+  }
+  let empty = true;
+  for (const e of entries) {
+    if (e.isDirectory()) {
+      if (pruneEmptyDirs(join(dir, e.name)))
+        rmSync(join(dir, e.name), { recursive: true, force: true });
+      else empty = false;
+    } else empty = false;
+  }
+  return empty && statSync(dir).isDirectory();
+}
+
+/* ------------------------------------------------------------------ *
+ * Self-test — `node scripts/convert-clone-to-routes.mjs --self-test`
+ *
+ * The string transforms are tested in clone-to-routes-lib.mjs, which is pure.
+ * What is left here is everything that touches the filesystem, and those are
+ * the decisions that change a repository irreversibly: which captured paths
+ * become which routes, which parked template routes come back, and the two
+ * config edits without which the converted site serves 404s at its own links.
+ * They are exercised against a real temporary repo rather than mocked, because
+ * a mock of `renameSync` cannot tell you a collision was handled.
+ * ------------------------------------------------------------------ */
+function selfTest() {
+  let failures = 0;
+  const eq = (name, actual, expected) => {
+    const a = JSON.stringify(actual);
+    const e = JSON.stringify(expected);
+    const ok = a === e;
+    console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}`);
+    if (!ok) {
+      console.log(`  expected ${e}`);
+      console.log(`  actual   ${a}`);
+      failures += 1;
+    }
+  };
+
+  // --- slug assignment -------------------------------------------------
+  // RFC 3986 makes a percent-escape's hex digits case-insensitive, so these
+  // two sitemap entries are one page. Publishing both would put the charity's
+  // article at two URLs with identical text.
+  const dup = assignSlugs([
+    'index.html',
+    'a-%EF%BF%BC/index.html',
+    'a-%ef%bf%bc/index.html',
+    '_ffc-assets/x.css',
+  ]);
+  eq('a duplicate spelling of one URL collapses', dup.assigned.length, 2);
+  eq('and is recorded rather than dropped silently', dup.duplicates.length, 1);
+  eq(
+    'both spellings route to the same page',
+    dup.duplicates[0].slug,
+    dup.assigned.find((a) => a.localPath.startsWith('a-')).slug,
+  );
+  eq(
+    'a non-page file is not a route',
+    dup.assigned.some((a) => a.localPath.endsWith('.css')),
+    false,
+  );
+
+  // Two genuinely different pages that sanitize alike must BOTH survive: a
+  // page silently missing from a migration is the failure nobody notices.
+  const clash = assignSlugs(['a b/index.html', 'a_b/index.html']);
+  eq('two different pages that sanitize alike both get routes', clash.assigned.length, 2);
+  eq('the second is suffixed, not dropped', clash.collisions.length, 1);
+  eq('and the two slugs are distinct', new Set(clash.assigned.map((a) => a.slug)).size, 2);
+
+  // `sanitizeSlug` keeps only [a-z0-9-], so a wholly non-Latin or
+  // punctuation-only permalink collapses to '' — the front page's slug.
+  const cyrillic = assignSlugs(['новости/index.html', 'index.html']);
+  eq(
+    'a permalink that sanitizes to nothing does not take the root',
+    cyrillic.assigned.map((a) => [a.localPath, a.slug]),
+    [
+      ['index.html', ''],
+      ['новости/index.html', 'page'],
+    ],
+  );
+  // Sort order put the Cyrillic entry first, and before the guard it claimed
+  // '' and pushed the real front page to '-2'.
+  eq(
+    'the front page keeps the root whatever sorts before it',
+    assignSlugs(['---/index.html', 'index.html']).assigned.find((a) => a.localPath === 'index.html')
+      .slug,
+    '',
+  );
+  eq(
+    'several such pages get distinct, valid slugs',
+    assignSlugs(['новости/index.html', 'статьи/index.html', 'index.html'])
+      .assigned.map((a) => a.slug)
+      .sort(),
+    ['', 'page', 'page-2'],
+  );
+  // A leading-hyphen folder fails the repo's own kebab-case drift rule.
+  eq(
+    'no slug starts with a hyphen',
+    assignSlugs(['---/index.html', 'новости/index.html', 'index.html']).assigned.some((a) =>
+      a.slug.startsWith('-'),
+    ),
+    false,
+  );
+
+  // --- the repo shape --------------------------------------------------
+  const dir = mkdtempSync(join(tmpdir(), 'ffc-convert-'));
+  try {
+    mkdirSync(join(dir, '_disabled_template_routes', 'privacy-policy'), { recursive: true });
+    mkdirSync(join(dir, '_disabled_template_routes', 'about-us'), { recursive: true });
+    mkdirSync(join(dir, 'src', 'app', 'about-us'), { recursive: true });
+    write(join(dir, '_disabled_template_routes', 'privacy-policy', 'page.tsx'), 'x');
+    write(join(dir, '_disabled_template_routes', 'about-us', 'page.tsx'), 'x');
+    write(join(dir, '_disabled_template_routes', 'page.tsx'), 'template home');
+    write(join(dir, 'src', 'app', 'about-us', 'page.tsx'), 'the captured page');
+
+    const routes = restoreTemplateRoutes(dir);
+    // The footer standard links to these; leaving them parked ships 404s.
+    eq('a parked template route comes back', routes.restored, ['privacy-policy']);
+    // The charity's front page owns / now.
+    eq(
+      'the template home page is dropped, not restored',
+      existsSync(join(dir, 'src', 'app', 'page.tsx')),
+      false,
+    );
+    // Restoring over a captured page would delete the charity's content.
+    eq('a route the capture owns is not overwritten', routes.collided, ['about-us']);
+    eq(
+      'and the captured page is still there',
+      readFileSync(join(dir, 'src', 'app', 'about-us', 'page.tsx'), 'utf8'),
+      'the captured page',
+    );
+
+    // Without this the export writes about-us.html and every internal link,
+    // every inbound link and every search result 404s.
+    write(join(dir, 'next.config.ts'), "const nextConfig = {\n  output: 'export',\n}\n");
+    eq('trailingSlash is enabled', enableTrailingSlash(dir).changed, true);
+    eq(
+      'and it lands inside the config object',
+      /output:\s*'export',\s*\n(?:\s*\/\/[^\n]*\n)*\s*trailingSlash: true,/.test(
+        readFileSync(join(dir, 'next.config.ts'), 'utf8'),
+      ),
+      true,
+    );
+    eq('a second run does not add it twice', enableTrailingSlash(dir).changed, false);
+    // The original anchor required single quotes AND a trailing comma, so it
+    // matched 1 of these 4 and silently no-op'd on the rest — a conversion that
+    // reported success and shipped a site whose own links 404.
+    for (const [label, line] of [
+      ['single quotes, comma', "  output: 'export',"],
+      ['double quotes, comma', '  output: "export",'],
+      ['single quotes, no comma', "  output: 'export'"],
+      ['double quotes, no comma', '  output: "export"'],
+    ]) {
+      write(join(dir, 'next.config.ts'), `const nextConfig = {\n${line}\n}\n`);
+      eq(`trailingSlash is set for: ${label}`, enableTrailingSlash(dir).changed, true);
+      const after = readFileSync(join(dir, 'next.config.ts'), 'utf8');
+      eq(`  and the output line keeps its comma: ${label}`, /export['"],/.test(after), true);
+      eq(
+        `  and trailingSlash lands inside the object: ${label}`,
+        /trailingSlash: true,\n\}/.test(after),
+        true,
+      );
+    }
+    write(join(dir, 'next.config.ts'), 'const nextConfig = {}\n');
+    eq(
+      'a config with no static export is left alone rather than guessed at',
+      enableTrailingSlash(dir).reason,
+      "no `output: 'export'` to anchor to",
+    );
+
+    // lhci asserts accessibility and SEO at ERROR level, so auditing 404s
+    // fails CI on the harness rather than on the site.
+    write(
+      join(dir, 'lighthouserc.json'),
+      JSON.stringify({
+        ci: {
+          collect: {
+            url: ['http://localhost/index.html', 'http://localhost/privacy-policy.html'],
+          },
+        },
+      }),
+    );
+    const lh = retargetLighthouseUrls(dir, ['about-us']);
+    eq('the audited policy URL gains its trailing slash', lh.urls, [
+      'http://localhost/index.html',
+      'http://localhost/about-us/index.html',
+      'http://localhost/privacy-policy/index.html',
+    ]);
+    eq('the front page keeps its own shape', lh.urls[0], 'http://localhost/index.html');
+    eq('a second run is a no-op', retargetLighthouseUrls(dir, ['about-us']).changed, false);
+
+    // --- the asset resolver cannot be walked out of ----------------------
+    // Verified against a real filesystem: a resolver that only rejects a
+    // LITERAL `..` still decodes `%2e%2e` afterwards, and `join` then escapes
+    // the assets tree — measured at /repo/public/etc/passwd before this.
+    mkdirSync(join(dir, 'public', '_ffc-assets', 'site.org', 'wp-content'), { recursive: true });
+    write(join(dir, 'public', '_ffc-assets', 'site.org', 'wp-content', 'a.pdf'), 'x');
+    write(join(dir, 'public', 'secret.txt'), 'not an asset');
+    const resolveAsset = makeAssetResolver(join(dir, 'public'), '_ffc-assets');
+
+    eq(
+      'a captured file resolves to its token path',
+      resolveAsset('wp-content/a.pdf'),
+      '%%BASE%%/_ffc-assets/site.org/wp-content/a.pdf',
+    );
+    eq(
+      'a file that was never captured resolves to nothing',
+      resolveAsset('wp-content/nope.pdf'),
+      null,
+    );
+    // Depth 3, because that is what actually reaches public/ from
+    // _ffc-assets/site.org/wp-content. The first draft of these cases used 2
+    // and passed against the OLD implementation too — proving nothing. The
+    // old resolver at depth 3 returns
+    // "%%BASE%%/_ffc-assets/site.org/wp-content/../../../secret.txt".
+    eq(
+      'a literal traversal cannot reach outside the assets tree',
+      resolveAsset('wp-content/../../../secret.txt'),
+      null,
+    );
+    // The gap Copilot found: the raw form has no `..`, so a blacklist passes
+    // it, and only the decoded form escapes.
+    eq(
+      'a percent-encoded traversal cannot either',
+      resolveAsset('wp-content/%2e%2e/%2e%2e/%2e%2e/secret.txt'),
+      null,
+    );
+    eq(
+      'nor a mixed-case percent-encoded one',
+      resolveAsset('wp-content/%2E%2E/%2E%2E/%2E%2E/secret.txt'),
+      null,
+    );
+    // Inside the tree but spelled with a dot segment: allowed, and normalised
+    // so the published URL never carries `../`.
+    eq(
+      'a dotted path that stays inside is normalised, not echoed',
+      resolveAsset('wp-content/../wp-content/a.pdf'),
+      '%%BASE%%/_ffc-assets/site.org/wp-content/a.pdf',
+    );
+
+    // --- inline styles get the same treatment as the linked ones -------
+    const styled = transformInlineStyles('<style>body.single h1{color:#fff}</style>');
+    eq(
+      'an inline style block is scoped and mirrored like a stylesheet',
+      styled.html,
+      '<style>.ffc-clone.single h1,.ffc-clone.single .ffc-h1{color:#fff}</style>',
+    );
+    eq('and the block is counted', styled.blocks, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  console.log(failures ? `\n${failures} self-test(s) failed` : '\nall self-tests passed');
+  return failures ? 1 : 0;
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
+  if (process.argv.includes('--self-test')) process.exit(selfTest());
+  main();
+}
