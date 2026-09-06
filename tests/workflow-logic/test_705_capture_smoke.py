@@ -43,6 +43,47 @@ SCRIPT = REPO_ROOT / "scripts" / "capture-wordpress-api.mjs"
 STUB = REPO_ROOT / "tests" / "fixtures" / "wp-fetch-stub.mjs"
 NODE = shutil.which("node") or "node"
 
+# Mirrors of the patterns in `normalizeAccessibility()`. They are constants
+# because keeping them inline let this test drift from the pass twice on one
+# PR (#1239) — once on case sensitivity, once on `\b`.
+#
+# `(?:^|\s)` before an attribute name, never `\b`: `-` is a non-word
+# character, so `\b` sits INSIDE `data-name`, `data-content` and `data-role`.
+# The pass documents this on its `role` check; the consequence here is that the
+# test reads the wrong attribute and then fails, or passes, for a reason that
+# has nothing to do with the page. Measured before the fix, on
+# `<meta name="viewport" data-content="user-scalable=no" content="width=device-width">`:
+# the content read returned `user-scalable=no` — a correct page failing the
+# zoom assertion on an attribute that is not the viewport's.
+VIEWPORT_META_RE = r"<meta(?:\s[^>]*)?\sname\s*=\s*[\"']viewport[\"'][^>]*>"
+META_CONTENT_RE = r"(?:^|\s)content\s*=\s*[\"']([^\"']*)[\"']"
+ROLE_MAIN_RE = r"(?:^|\s)role\s*=\s*[\"']main[\"']"
+
+
+def test_the_accessibility_patterns_do_not_match_data_attributes() -> None:
+    """The mirrors above must discriminate, or the smoke assertion is noise.
+
+    Pure and offline — no capture — because what is under test is the pattern,
+    not the pipeline. Every decoy here is markup a real theme can emit.
+    """
+    real = '<meta name="viewport" content="width=device-width">'
+    assert re.search(VIEWPORT_META_RE, real, re.I)
+    assert re.search(VIEWPORT_META_RE, real.upper().replace("WIDTH=DEVICE-WIDTH", "x"), re.I)
+    assert re.search(VIEWPORT_META_RE, '<meta name = "viewport" content = "x">', re.I)
+    assert not re.search(VIEWPORT_META_RE, '<meta data-name="viewport" content="x">', re.I)
+    assert not re.search(VIEWPORT_META_RE, '<meta name="description" content="x">', re.I)
+
+    # The content read must take the tag's own `content`, not a `data-content`
+    # sitting to its left — `re.search` returns the LEFTMOST match.
+    decoy = '<meta name="viewport" data-content="user-scalable=no" content="width=device-width">'
+    assert re.search(META_CONTENT_RE, decoy, re.I).group(1) == "width=device-width"
+
+    assert re.search(ROLE_MAIN_RE, '<div role="main">', re.I)
+    assert re.search(ROLE_MAIN_RE, "<div ROLE='main'>", re.I)
+    assert not re.search(ROLE_MAIN_RE, '<div data-role="main">', re.I)
+    assert not re.search(ROLE_MAIN_RE, '<div role="navigation">', re.I)
+
+
 
 def run_capture(out_dir: pathlib.Path) -> tuple[subprocess.CompletedProcess, dict | None]:
     """Run the capture against the fixture. Returns (proc, report-or-None)."""
@@ -214,16 +255,15 @@ def test_the_cms_accessibility_defects_are_corrected() -> None:
         # the fixture happens to use the restrictive form.
         #
         # Read the tag the way `normalizeAccessibility()` writes it, not the way
-        # this fixture happens to spell it. That pass matches
-        # `/<meta\b[^>]*\bname\s*=\s*["']viewport["'][^>]*>/gi`, so it handles
-        # `<META NAME=...>` and spaces around the `=`; these assertions did not,
-        # and would have reported "the viewport meta should still be present"
-        # about output that was in fact correct. Measured: of `<meta name=`,
-        # `<META NAME=`, `<meta Name=` and `<meta name = `, the case-sensitive
-        # form found only the first. Also raised in review on #1239.
-        tag = re.search(r"<meta\b[^>]*\bname\s*=\s*[\"']viewport[\"'][^>]*>", html, re.I)
+        # this fixture happens to spell it — the shared patterns are defined at
+        # the top of this module, so the assertion cannot drift from the pass
+        # again. It did, twice, both caught in review on #1239: first
+        # case-SENSITIVE (of `<meta name=`, `<META NAME=`, `<meta Name=` and
+        # `<meta name = `, it found only the first) and then, after that fix,
+        # still anchored on `\b`, which sits inside `data-name`/`data-content`.
+        tag = re.search(VIEWPORT_META_RE, html, re.I)
         assert tag, "the viewport meta should still be present"
-        content = re.search(r"\bcontent\s*=\s*[\"']([^\"']*)[\"']", tag.group(0), re.I)
+        content = re.search(META_CONTENT_RE, tag.group(0), re.I)
         assert content, tag.group(0)
         parts = [p.strip() for p in content.group(1).split(",")]
 
@@ -235,9 +275,9 @@ def test_the_cms_accessibility_defects_are_corrected() -> None:
         assert "width=device-width" in parts, parts
         # Same reason, one line down: the pass only INJECTS `role="main"` when
         # the wrapper has no role of its own, so on a page that already carried
-        # `ROLE='main'` this substring test fails on a landmark that is present.
+        # `ROLE='main'` a substring test fails on a landmark that is present.
         assert re.search(
-            r"\brole\s*=\s*[\"']main[\"']", html, re.I
+            ROLE_MAIN_RE, html, re.I
         ), "a screen reader needs a skip-to-content target"
 
 
