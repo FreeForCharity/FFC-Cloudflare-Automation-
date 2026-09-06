@@ -158,7 +158,18 @@ export function assignSlugs(localPaths) {
       continue;
     }
 
-    const base = sanitizeSlug(raw);
+    // `sanitizeSlug` keeps only `[a-z0-9-]`, so a permalink written entirely in
+    // a non-Latin script (`/новости/`) or in punctuation (`/---/`) collapses to
+    // the EMPTY string — which is the front page's slug. Measured before this
+    // guard: `['новости/index.html', 'index.html']` assigned `['', '-2']`, so
+    // a random post became the site root and the charity's actual front page
+    // was published at `/-2/`. A leading-hyphen folder also fails the repo's
+    // kebab-case drift rule, which is the symptom that would have been noticed
+    // first and the least of it.
+    //
+    // Only the root may hold the empty slug, and the root is the one entry
+    // whose `raw` is itself empty.
+    const base = raw ? sanitizeSlug(raw) || 'page' : '';
     let slug = base;
     let n = 2;
     while (taken.has(slug)) {
@@ -816,6 +827,41 @@ function selfTest() {
   eq('two different pages that sanitize alike both get routes', clash.assigned.length, 2);
   eq('the second is suffixed, not dropped', clash.collisions.length, 1);
   eq('and the two slugs are distinct', new Set(clash.assigned.map((a) => a.slug)).size, 2);
+
+  // `sanitizeSlug` keeps only [a-z0-9-], so a wholly non-Latin or
+  // punctuation-only permalink collapses to '' — the front page's slug.
+  const cyrillic = assignSlugs(['новости/index.html', 'index.html']);
+  eq(
+    'a permalink that sanitizes to nothing does not take the root',
+    cyrillic.assigned.map((a) => [a.localPath, a.slug]),
+    [
+      ['index.html', ''],
+      ['новости/index.html', 'page'],
+    ],
+  );
+  // Sort order put the Cyrillic entry first, and before the guard it claimed
+  // '' and pushed the real front page to '-2'.
+  eq(
+    'the front page keeps the root whatever sorts before it',
+    assignSlugs(['---/index.html', 'index.html']).assigned.find((a) => a.localPath === 'index.html')
+      .slug,
+    '',
+  );
+  eq(
+    'several such pages get distinct, valid slugs',
+    assignSlugs(['новости/index.html', 'статьи/index.html', 'index.html'])
+      .assigned.map((a) => a.slug)
+      .sort(),
+    ['', 'page', 'page-2'],
+  );
+  // A leading-hyphen folder fails the repo's own kebab-case drift rule.
+  eq(
+    'no slug starts with a hyphen',
+    assignSlugs(['---/index.html', 'новости/index.html', 'index.html']).assigned.some((a) =>
+      a.slug.startsWith('-'),
+    ),
+    false,
+  );
 
   // --- the repo shape --------------------------------------------------
   const dir = mkdtempSync(join(tmpdir(), 'ffc-convert-'));
