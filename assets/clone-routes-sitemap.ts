@@ -56,10 +56,17 @@ type SitemapEntry = {
 // Priority schema: 1.0 for the front page, 0.5 for everything else. The capture
 // carries no signal that would distinguish a section landing page from a post,
 // so a finer gradient here would be decoration, not information.
+// Trailing slash, to match `trailingSlash: true` and the per-page canonical.
+// Without it the sitemap advertises 593 URLs that every page's own
+// rel=canonical contradicts, and that the host answers with a 301 — measured:
+// sitemap `…/about-us` against canonical `…/about-us/`. A crawler is being
+// told two different addresses for one page by the same site.
+const asServed = (path: string) => (path.endsWith('/') ? path : `${path}/`)
+
 export const routes: readonly SitemapEntry[] = discoverRoutes()
   .sort()
   .map((path) => ({
-    path,
+    path: asServed(path),
     changeFrequency: 'monthly' as const,
     priority: path === '/' ? 1.0 : 0.5,
   }))

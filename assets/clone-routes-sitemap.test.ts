@@ -12,7 +12,19 @@ import { siteConfig } from '../../src/lib/site.config'
 
 describe('sitemap.ts', () => {
   it('lists every route exactly once', () => {
-    expect(routes.map((r) => r.path).sort()).toEqual(discoverRoutes().sort())
+    expect(routes.map((r) => r.path).sort()).toEqual(
+      discoverRoutes()
+        .map((p) => (p.endsWith('/') ? p : `${p}/`))
+        .sort()
+    )
+  })
+
+  // next.config sets `trailingSlash: true`, so every page is served at — and
+  // canonicalises to — its slashed URL. A sitemap that advertises the slashless
+  // form tells a crawler a different address than the page itself does, and the
+  // host answers it with a 301.
+  it('advertises the URL each page is actually served at', () => {
+    for (const r of routes) expect(r.path.endsWith('/')).toBe(true)
   })
 
   it('contains no duplicate path entries', () => {
@@ -58,7 +70,11 @@ describe('sitemap.ts', () => {
       .filter((e) => e.isDirectory() && !/^[(_[]/.test(e.name))
       .filter((e) => fs.existsSync(path.join(APP_DIR, e.name, 'page.tsx'))).length
 
-    const topLevel = routes.filter((r) => r.path !== '/' && r.path.lastIndexOf('/') === 0).length
+    // Depth by SEGMENT count, not by the position of a '/': every path now
+    // ends in one, so `lastIndexOf('/') === 0` matched nothing and this
+    // assertion silently compared 253 against 0.
+    const depth = (p: string) => p.split('/').filter(Boolean).length
+    const topLevel = routes.filter((r) => depth(r.path) === 1).length
     expect(onDisk).toBeGreaterThan(0)
     expect(topLevel).toBe(onDisk)
   })
