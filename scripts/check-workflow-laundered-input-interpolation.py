@@ -581,7 +581,7 @@ The `env:` mapping is evaluated by the expression engine and arrives as an
 environment variable, so the value is data rather than source code. Add the
 empty check with it: an env-mapped value that is empty is not an empty argument
 to a NATIVE command, it is NO argument, and every later argument binds one
-position to the left (ledger L214, and `check-env-mapped-input-emptiness.py`).
+position to the left (ledger L214, and `scripts/check-workflow-empty-input-guard.py`).
 
 Fixing the WRITE end instead — sanitising before `GITHUB_OUTPUT` — is not a
 remedy. `.Trim().ToLowerInvariant().Trim('.')` removes nothing that matters, and
