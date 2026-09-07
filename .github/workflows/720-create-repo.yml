@@ -20,6 +20,7 @@ on:
         options:
           - FreeForCharity/FFC_Single_Page_Template
           - FreeForCharity/FFC-IN-Single_Page_Template_Jekell
+          - FreeForCharity/FFC-IN-Footer_Only_Template
       Visibility:
         description: 'Visibility (private repos get NO tier-team grants — Option C policy)'
         required: true
