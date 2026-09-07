@@ -480,6 +480,12 @@ def current_map(hops: list[Hop]) -> dict[str, tuple[str, ...]]:
 # sibling is defined over while the value goes on being substituted into script
 # text at the far end.
 #
+# Burn-down since that measurement, kept here so the dated line above stays a
+# measurement rather than turning into a wrong description of the dict below it:
+# 702 fixed and removed 2026-09-07 (#1241 lane 1), leaving 4 workflows / 23 call
+# sites / 16 distinct references. Do not restate the original figures as
+# current — the guard prints both counts on every invocation.
+#
 # Burn-down is tracked separately, ordered by environment, the way #1080 orders
 # its own. An entry here is not an endorsement.
 KNOWN_LAUNDERED: dict[str, dict[str, str]] = {
@@ -533,20 +539,13 @@ KNOWN_LAUNDERED: dict[str, dict[str, str]] = {
             "a count from the audit, not the input; sink is a single-quoted JS "
             "literal in github-script.",
     },
-    "702-ffc-ex-clone-deploy.yml": {
-        "needs.preflight.outputs.repo_name":
-            "LIVE. `repo_name` is the `repo_name` dispatch input with its "
-            "canonical casing resolved, republished as a job output and read "
-            "back into `repo=\"${{ … }}\"` — a bash double-quoted assignment, "
-            "where `$( )` executes. Burn down first.",
-        "steps.target.outputs.repo":
-            "LIVE. The same value one hop further, republished by the step "
-            "above into a bash double-quoted body.",
-        "steps.target.outputs.branch":
-            "LIVE by the step rule: written by the step that holds "
-            "`repo_name`. The literal written is a date-stamped constant, but "
-            "it is published by a carrying step into a double-quoted body.",
-    },
+    # 702-ffc-ex-clone-deploy.yml was here — burned down in #1241 lane 1. All
+    # three references (`needs.preflight.outputs.repo_name`,
+    # `steps.target.outputs.repo`, `steps.target.outputs.branch`) now reach
+    # their bodies through step-level `env:` with a fail-closed emptiness check,
+    # so no `${{ … }}` for them is substituted into script text. The job entered
+    # `github-prod` with the Key Vault PAT already exported to `GITHUB_ENV`,
+    # which is the credential an injected body would have held.
     "706-website-wordpress-to-pages.yml": {
         "needs.resolve.outputs.domain":
             "LIVE. `resolve` takes `inputs.domain` through step-level `env:` — "
