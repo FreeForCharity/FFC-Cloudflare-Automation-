@@ -81,6 +81,16 @@ on:
         type: choice
         options: [convert, deliver]
         default: convert
+      min_capture_percent:
+        description: >-
+          Fail the conversion if fewer than this percentage of the merged inventory (REST + sitemap)
+          was captured. This is the completeness gate — the migration must not LOSE content. It is
+          deliberately NOT a gate on asset failures: a live site's own broken links are reproduced
+          faithfully, and refusing to migrate a site because it already has a dead image would
+          disqualify most real charity sites.
+        required: false
+        type: string
+        default: '98'
       max_items:
         description: 'Maximum inventory entries to capture.'
         required: false
@@ -121,6 +131,7 @@ jobs:
       publish_domain: ${{ steps.resolve.outputs.publish_domain }}
       cname_domain: ${{ steps.resolve.outputs.cname_domain }}
       mode: ${{ steps.resolve.outputs.mode }}
+      min_percent: ${{ steps.resolve.outputs.min_percent }}
       max: ${{ steps.resolve.outputs.max }}
       delay: ${{ steps.resolve.outputs.delay }}
       posts: ${{ steps.resolve.outputs.posts }}
@@ -139,6 +150,7 @@ jobs:
           INPUT_EMAIL: ${{ inputs.contact_email }}
           INPUT_PUBLISH: ${{ inputs.publish_domain }}
           INPUT_MODE: ${{ inputs.mode }}
+          INPUT_MINPCT: ${{ inputs.min_capture_percent }}
           INPUT_MAX: ${{ inputs.max_items }}
           INPUT_DELAY: ${{ inputs.delay_ms }}
           INPUT_POSTS: ${{ inputs.include_posts }}
@@ -288,6 +300,13 @@ jobs:
           # parseInt-style parsing accepts '12abc' as 12 and yields NaN for
           # 'abc', which then propagates into a fetch loop as an unbounded or
           # zero-length run. Refuse anything that is not wholly digits.
+          min_percent="$(trim "${INPUT_MINPCT:-}")"
+          if [ -z "$min_percent" ]; then min_percent="98"; fi
+          if ! printf '%s' "$min_percent" | grep -qE '^[0-9]+$' || [ "$min_percent" -lt 1 ] || [ "$min_percent" -gt 100 ]; then
+            echo "::error::min_capture_percent '$min_percent' must be a whole number between 1 and 100."
+            exit 1
+          fi
+
           max="$(trim "${INPUT_MAX:-}")"
           if [ -z "$max" ]; then max="800"; fi
           if ! printf '%s' "$max" | grep -qE '^[0-9]+$' || [ "$max" -lt 1 ] || [ "$max" -gt 5000 ]; then
@@ -344,6 +363,7 @@ jobs:
             echo "publish_domain=$publish"
             echo "cname_domain=$cname_domain"
             echo "mode=$mode"
+            echo "min_percent=$min_percent"
             echo "max=$max"
             echo "delay=$delay"
             echo "posts=$posts"
@@ -361,6 +381,9 @@ jobs:
           node scripts/replace-forms-with-mailto.mjs --self-test
           node scripts/integrate-clone-into-nextjs.mjs --self-test
           node scripts/verify-no-legacy.mjs --self-test
+          node scripts/assess-capture-completeness.mjs --self-test
+          node scripts/clone-to-routes-lib.mjs --self-test
+          node scripts/convert-clone-to-routes.mjs --self-test
 
   convert:
     runs-on: ubuntu-latest
@@ -383,21 +406,74 @@ jobs:
         with:
           node-version: '20'
 
+      # sharp is imported dynamically by the capture, which keeps this repo
+      # dependency-free. Installed here rather than committed because it is a
+      # native module: the binary that works on this runner is not the one that
+      # works on the Conductor's Windows host, so pinning it in a lockfile here
+      # would break the local self-test rather than help it. Without it the
+      # capture still succeeds and simply ships the originals — it says so, and
+      # the receiving repo's per-file image budget then fails, which is the
+      # visible symptom rather than a silent 200 MB of flyers.
+      - name: Install the image encoder
+        working-directory: automation
+        shell: bash
+        run: npm install --no-save --no-audit --no-fund sharp@0.34.5
+
       - name: Capture the live WordPress site
         working-directory: automation
         env:
           DOMAIN: ${{ needs.resolve.outputs.domain }}
           MAX: ${{ needs.resolve.outputs.max }}
+          MIN_PERCENT: ${{ needs.resolve.outputs.min_percent }}
           DELAY: ${{ needs.resolve.outputs.delay }}
           POSTS: ${{ needs.resolve.outputs.posts }}
           IGNORE_HOSTS: ${{ needs.resolve.outputs.ignore_hosts }}
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
           args=(--domain "$DOMAIN" --out "$RUNNER_TEMP/capture/site" --max "$MAX" --delay "$DELAY")
           if [ "$POSTS" = "true" ]; then args+=(--include-posts); fi
           if [ -n "$IGNORE_HOSTS" ]; then args+=(--ignore-hosts "$IGNORE_HOSTS"); fi
+
+          set +e
           node scripts/capture-wordpress-api.mjs "${args[@]}"
+          rc=$?
+          set -e
+
+          # The capture exits 1 for ANY unmet gate, which conflates two things
+          # that deserve opposite treatment:
+          #
+          #   COMPLETENESS — did we get the site? Losing pages is a migration
+          #   defect and must stop the run.
+          #
+          #   ASSET HEALTH — are there dead references? A live site's own broken
+          #   links are reproduced FAITHFULLY. Failing on them would mean FFC
+          #   can never migrate a site that has one dead image, which is most
+          #   real charity sites. Measured on the first live delivery: 15 failed
+          #   assets, all of them 404/410 on the live site too, blocked a
+          #   capture that had reached 589 of 590 entries with ZERO page-fetch
+          #   failures.
+          #
+          # So completeness is enforced here, on the report's own numbers, and
+          # asset health is reported. `verify-no-legacy` remains the hard gate
+          # on whether the exported site actually stands alone.
+          report="$RUNNER_TEMP/capture/site/wp-capture-report.json"
+          if [ ! -f "$report" ]; then
+            echo "::error::The capture produced no report at $report (exit $rc). Nothing to assess."
+            exit 1
+          fi
+          if [ "$rc" -ge 2 ]; then
+            echo "::error::capture-wordpress-api.mjs exited $rc — usage error or crash, not a gate result."
+            exit 1
+          fi
+
+          # In a script, not `node -e '…'`: every JS template literal inside a
+          # single-quoted shell string reads to shellcheck as an unexpanded
+          # shell variable (SC2016), and quoting around that is how a script
+          # acquires escaping nobody can safely edit later. The file also gets
+          # its own self-tests, which an inline block cannot have.
+          node scripts/assess-capture-completeness.mjs \
+            --report "$report" --min-percent "$MIN_PERCENT"
 
       # Runs BEFORE integration, so the forms are dead in the artifact too and
       # a later stage cannot accidentally publish the un-neutralized capture.
@@ -494,6 +570,32 @@ jobs:
             echo "No publish_domain and no pre-existing CNAME: removed public/CNAME so Pages serves the default URL."
           fi
 
+      - name: Convert the capture into real app routes
+        env:
+          SOURCE_DOMAIN: ${{ needs.resolve.outputs.domain }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The integration above lands the capture in `public/`, which deploys
+          # — `output: 'export'` copies that directory verbatim — and leaves the
+          # repo in a shape no production FFC-EX site uses. There are no app
+          # routes, so the template's per-page canonicals, its <main> landmark,
+          # its skip-link target and its one-h1-per-page build check have
+          # nothing to act on, and every captured page is a file the Next.js
+          # toolchain cannot see.
+          #
+          # This turns each captured page into `src/app/<slug>/page.tsx` plus a
+          # `src/clone-content/<slug>.html` fragment, and applies the
+          # corrections that need the whole site in view: one h1 per page with
+          # no skipped level (Divi's per-module CSS carried across so nothing
+          # is restyled), a description on every page with words of its own, an
+          # accessible name on every link and embed, and the source's dead
+          # cookie-consent banner removed. It fails rather than warns if any
+          # captured page did not become a route.
+          node automation/scripts/convert-clone-to-routes.mjs \
+            --repo ffc-ex \
+            --site-name "$SOURCE_DOMAIN"
+
       - name: Build the static export
         working-directory: ffc-ex
         shell: bash
@@ -561,8 +663,15 @@ jobs:
           routes="$(find "$parked" -name 'page.*' -printf '%h\n' 2>/dev/null \
             | sed -e "s|^$parked$|/|" -e "s|^$parked/||" | sort -u)"
           echo "Parked routes:"; echo "$routes"
+          # Only search directories that exist. grep exits 2 for a missing path,
+          # which the rc check below treats as a real error — so a target repo
+          # with only one of these would fail here for no reason.
+          dirs=()
+          for d in __tests__ tests; do [ -d "$d" ] && dirs+=("$d"); done
           hits=""
           root_parked=""
+          searched="yes"
+          if [ ${#dirs[@]} -eq 0 ]; then searched=""; fi
           for r in $routes; do
             [ -n "$r" ] || continue
             # The root route cannot be searched for the way the others can: a
@@ -571,8 +680,33 @@ jobs:
             # than skipped — skipping it silently prints "None." for the one
             # route every template has, which reads as "nothing is affected"
             # when the home page has in fact just been replaced.
+            #
+            # This check must come BEFORE the no-test-directories guard below:
+            # noting that the home page was replaced does not depend on there
+            # being tests to search. Ordering it the other way silently dropped
+            # the note on a repo with no test dirs — caught in review on #1231.
             if [ "$r" = "/" ]; then root_parked="yes"; continue; fi
-            f="$(grep -rlF -- "/$r" __tests__ tests 2>/dev/null | tr '\n' ' ')"
+            # Nothing to search against, so the per-route greps are skipped —
+            # but the root note above is still reported.
+            [ -n "$searched" ] || continue
+            # grep exits 1 for "no match", which is the NORMAL answer here and
+            # must not end the step; `shell: bash` runs with -e, and with
+            # pipefail that 1 propagates out of the pipeline and through the
+            # assignment. This killed delivery attempt 5 on the first route no
+            # test referenced, AFTER the self-containment gate had passed.
+            #
+            # The forms search 15 lines up already handles this exactly right.
+            # Fixing one site of a bug and leaving its twin is the failure mode
+            # this whole workflow keeps hitting, so the two now match:
+            # 0 = matches, 1 = no matches, >1 = a real error worth stopping for.
+            set +e
+            f="$(grep -rlF -- "/$r" "${dirs[@]}" | tr '\n' ' ')"
+            rc=$?
+            set -e
+            if [ "$rc" -gt 1 ]; then
+              echo "::error::Searching the target repo's tests for /$r failed (grep exit $rc). Refusing to treat a failed search as 'no references'."
+              exit 1
+            fi
             if [ -n "$f" ]; then hits="${hits}- \`/$r\` referenced by: $f"$'\n'; fi
           done
           {
@@ -581,6 +715,8 @@ jobs:
             echo ""
             if [ -n "$hits" ]; then
               echo "$hits"
+            elif [ -z "$searched" ]; then
+              echo "The target repo has no \`__tests__\` or \`tests\` directory, so nothing was searched."
             else
               echo "No non-root parked route is referenced by a test."
             fi
@@ -801,6 +937,32 @@ jobs:
             rm -f ffc-ex/public/CNAME
             echo "No publish_domain and no pre-existing CNAME: removed public/CNAME so Pages serves the default URL."
           fi
+
+      - name: Convert the capture into real app routes
+        env:
+          SOURCE_DOMAIN: ${{ needs.resolve.outputs.domain }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The integration above lands the capture in `public/`, which deploys
+          # — `output: 'export'` copies that directory verbatim — and leaves the
+          # repo in a shape no production FFC-EX site uses. There are no app
+          # routes, so the template's per-page canonicals, its <main> landmark,
+          # its skip-link target and its one-h1-per-page build check have
+          # nothing to act on, and every captured page is a file the Next.js
+          # toolchain cannot see.
+          #
+          # This turns each captured page into `src/app/<slug>/page.tsx` plus a
+          # `src/clone-content/<slug>.html` fragment, and applies the
+          # corrections that need the whole site in view: one h1 per page with
+          # no skipped level (Divi's per-module CSS carried across so nothing
+          # is restyled), a description on every page with words of its own, an
+          # accessible name on every link and embed, and the source's dead
+          # cookie-consent banner removed. It fails rather than warns if any
+          # captured page did not become a route.
+          node automation/scripts/convert-clone-to-routes.mjs \
+            --repo ffc-ex \
+            --site-name "$SOURCE_DOMAIN"
 
       - name: Commit and open a draft PR on the FFC-EX repo
         working-directory: ffc-ex

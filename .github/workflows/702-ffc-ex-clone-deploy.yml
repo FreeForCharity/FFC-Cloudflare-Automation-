@@ -302,11 +302,27 @@ jobs:
 
       - name: Resolve target repo
         id: target
+        shell: bash
+        env:
+          # `repo_name` is the `ffc_ex_repo` / `domain` dispatch input with its
+          # canonical casing resolved, republished as a job output. Read through
+          # `env:` it arrives as DATA; interpolated into the body below it would
+          # be substituted as script TEXT, and `$( )` executes inside a
+          # double-quoted bash assignment (#1241, #1233).
+          IN_REPO_NAME: ${{ needs.preflight.outputs.repo_name }}
         run: |
+          set -euo pipefail
           # Canonical casing resolved by the preflight job (github.io paths and display
           # are case-sensitive even though the git/API layer is not).
-          repo="${{ needs.preflight.outputs.repo_name }}"
-          echo "repo=$repo" >> "$GITHUB_OUTPUT"
+          #
+          # Fail closed on empty: a blank value would publish `repo=` and every
+          # later use would silently address `FreeForCharity/` — a checkout, a
+          # push and a `gh pr create` against a repo name that is not there.
+          if [ -z "${IN_REPO_NAME:-}" ]; then
+            echo "::error::IN_REPO_NAME is empty — the preflight job published no repo_name. Refusing to continue with an unresolved target."
+            exit 1
+          fi
+          echo "repo=$IN_REPO_NAME" >> "$GITHUB_OUTPUT"
           echo "branch=clone/static-from-live-$(date +%Y%m%d%H%M%S)" >> "$GITHUB_OUTPUT"
 
       - name: Clone the live site (httrack)
@@ -386,31 +402,69 @@ jobs:
         if: ${{ inputs.dry_run }}
         working-directory: ffc-ex
         shell: bash
+        env:
+          # Both arrive as DATA rather than as substituted script text: `repo`
+          # carries the dispatch input one hop on, and `branch` is published by
+          # the same carrying step. The sink below is a double-quoted `echo`,
+          # where `$( )` executes (#1241).
+          TARGET_REPO: ${{ steps.target.outputs.repo }}
+          TARGET_BRANCH: ${{ steps.target.outputs.branch }}
         run: |
           set -euo pipefail
-          branch='${{ steps.target.outputs.branch }}'
+          if [ -z "${TARGET_REPO:-}" ] || [ -z "${TARGET_BRANCH:-}" ]; then
+            echo "::error::TARGET_REPO / TARGET_BRANCH is empty — the 'Resolve target repo' step published nothing."
+            exit 1
+          fi
+          branch="$TARGET_BRANCH"
+          # Enumerate ONCE into a file rather than piping into `head`.
+          # `git add -A --dry-run | head -200` under `pipefail` is a live bug on
+          # any real clone: `head` closes the pipe at line 200, git dies of
+          # SIGPIPE, the pipeline returns 141 and `set -e` kills this step —
+          # after the clone, the integration and the Next.js build have all
+          # already run. Reproduced in this exact shape (strict mode, big
+          # producer, inside the redirected block): exit 141, block never
+          # completes. A WordPress clone is thousands of paths, so the 200-line
+          # cut is always reached. Reading the file with `sed` cannot SIGPIPE,
+          # and the count now comes from the same snapshot as the listing
+          # instead of a second full traversal that could disagree with it.
+          changes="$RUNNER_TEMP/702-dry-run-changes.txt"
+          git add -A --dry-run > "$changes"
+          total=$(wc -l < "$changes")
           {
             echo "## 702 dry run — no commit, no push, no PR"
             echo ""
-            echo "Would have committed to \`$branch\` on \`FreeForCharity/${{ steps.target.outputs.repo }}\` and opened a draft PR."
+            echo "Would have committed to \`$branch\` on \`FreeForCharity/$TARGET_REPO\` and opened a draft PR."
             echo ""
             echo "### Files that would be committed"
             echo ""
             echo '```'
-            git add -A --dry-run | head -200
+            sed -n '1,200p' "$changes"
             echo '```'
             echo ""
-            echo "Total changed paths: $(git add -A --dry-run | wc -l)"
+            echo "Total changed paths: $total"
           } >> "$GITHUB_STEP_SUMMARY"
           echo "::notice::dry_run=true — clone and build completed, nothing was written to the target repo."
 
       - name: Commit and open PR on the FFC-EX repo
         if: ${{ !inputs.dry_run }}
         working-directory: ffc-ex
+        shell: bash
+        env:
+          # Same reason as the dry-run step above: this is the WRITE path, on
+          # `github-prod` with the Key Vault PAT already loaded, so a value
+          # substituted into this body as text executes with that credential in
+          # reach (#1241).
+          TARGET_REPO: ${{ steps.target.outputs.repo }}
+          TARGET_BRANCH: ${{ steps.target.outputs.branch }}
         run: |
+          set -euo pipefail
+          if [ -z "${TARGET_REPO:-}" ] || [ -z "${TARGET_BRANCH:-}" ]; then
+            echo "::error::TARGET_REPO / TARGET_BRANCH is empty — the 'Resolve target repo' step published nothing."
+            exit 1
+          fi
           git config user.name 'ffc-clone-bot'
           git config user.email 'noreply@freeforcharity.org'
-          branch='${{ steps.target.outputs.branch }}'
+          branch="$TARGET_BRANCH"
           git checkout -b "$branch"
           git add -A
           # --no-verify: the cloned WordPress assets must not run through the
@@ -419,7 +473,7 @@ jobs:
             -m "Replace template scaffold with faithful static clone of live ${{ inputs.domain }}" \
             -m "Generated by automation workflow 27 (clone-site-static.mjs + integrate-clone-into-nextjs.mjs). The Next.js output:'export' build now serves the exact live WordPress visuals; template page routes moved to _disabled_template_routes/."
           git push -u origin "$branch"
-          gh pr create --repo "FreeForCharity/${{ steps.target.outputs.repo }}" \
+          gh pr create --repo "FreeForCharity/$TARGET_REPO" \
             --base main --head "$branch" --draft \
             --title "Static clone of live ${{ inputs.domain }} (replaces template scaffold)" \
             --body "Automated faithful static clone of the live WordPress site, served via the existing Next.js \`output: 'export'\` build. See the automation repo's docs/ffc-ex-static-clone-runbook.md. Review the visual fidelity against the live site before merging/cutover."

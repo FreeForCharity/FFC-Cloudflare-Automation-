@@ -56,11 +56,54 @@ jobs:
 
       - name: Run EPP probe
         shell: pwsh
+        # `domain` is a free-text dispatch input. Interpolated into this body it was
+        # not an argument — it was source text pasted into the program GitHub then
+        # runs, holding the WHMCS API credential the APPROVER spent, against a
+        # workflow that can ask a registrar to release a transfer auth code (#1080).
+        # The credential is named in no `env:` block here: the preceding
+        # `whmcs-secrets-from-kv` step exports WHMCS_API_IDENTIFIER / _SECRET /
+        # _APIM_SUBSCRIPTION_KEY through GITHUB_ENV, so a reader who checks this
+        # step's own `env:` (ledger L213) and a `secrets.` grep of the file (#1141)
+        # both score it as holding nothing. Run `python3
+        # scripts/check-workflow-input-interpolation.py --reachability
+        # 116-domain-transfer-epp-probe.yml` for the arrival path (#1188).
+        #
+        # Both call sites sat in DOUBLE quotes, where pwsh expands `$( )` — so this
+        # needed no quote breakout at all. Measured on the shipped body with
+        # `domain` = `example.org$($null = Set-Content -Path <sentinel> -Value
+        # $env:WHMCS_API_SECRET)`: the WHMCS secret was written to the sentinel, the
+        # callee was still invoked with a legal `Domain=[example.org]`, and the step
+        # exited **0** under whmcs-prod after the approval. `$null =` is what keeps
+        # the variable's value legal, which is why the run looks ordinary in the log.
+        # `tests/workflow-logic/test_116_epp_probe_wiring.py` measures both
+        # directions rather than asserting this.
+        #
+        # `mode` (choice) and `show_code` (boolean) stay interpolated on purpose:
+        # GitHub generates both from the declared options, so neither can carry a
+        # payload.
         env:
           WHMCS_API_URL: 'https://apim-ffc-gateway-prod.azure-api.net/whmcs/api.php'
+          IN_DOMAIN: ${{ inputs.domain }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $domain = "${{ inputs.domain }}"
+
+          # Fail closed on an empty or unset mapping (#1150, ledger L214). What that
+          # buys HERE is narrower than in the hashtable lanes, and it was measured
+          # rather than inherited: every other element this body splats is a SWITCH
+          # (`-Execute`, `-ShowCode`), and a switch cannot absorb a value, so a blank
+          # `Domain` never silently shifts into a plausible call. Measured on pwsh
+          # 7.4.6, `& pwsh -File … @scriptArgs` with the guard removed — unset gives
+          # `Missing an argument for parameter 'Domain'` and empty gives `Cannot bind
+          # argument to parameter 'Domain' because it is an empty string`, both rc 1.
+          # The guard is still the right thing: it names the CAUSE (a missing or
+          # misnamed `env:` mapping) at the step that owns it, instead of surfacing
+          # as a binder error attributed to the callee.
+          if ([string]::IsNullOrWhiteSpace($env:IN_DOMAIN)) {
+            Write-Output '::error::IN_DOMAIN is empty: the step-level env: mapping is missing or misnamed, or the dispatch supplied a blank domain. Refusing to call domain-transfer-epp-probe.ps1 with an empty -Domain.'
+            exit 1
+          }
+
+          $domain = $env:IN_DOMAIN
           $mode = "${{ inputs.mode }}"
 
           $scriptArgs = @('-Domain', $domain)
@@ -76,5 +119,5 @@ jobs:
           $summary = ($out | Out-String)
           Write-Host $summary
           $fence = [string][char]0x60 * 3
-          $lines = @("### EPP probe ($mode): ${{ inputs.domain }}", '', ($fence + 'json'), $summary.TrimEnd(), $fence)
+          $lines = @("### EPP probe ($mode): $domain", '', ($fence + 'json'), $summary.TrimEnd(), $fence)
           $lines | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8

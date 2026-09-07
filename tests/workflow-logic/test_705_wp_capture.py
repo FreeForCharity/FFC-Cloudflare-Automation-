@@ -342,6 +342,113 @@ def test_internal_whitespace_in_the_domain_still_fails_closed():
     assert "example.orgattacker.com" not in outputs, outputs
 
 
+def _self_test(script: str) -> subprocess.CompletedProcess:
+    """Run a shipped script's own offline self-test suite."""
+    import os
+
+    return subprocess.run(
+        ["node", str(REPO_ROOT / "scripts" / script), "--self-test"],
+        env=dict(os.environ),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=120,
+    )
+
+
+def test_the_capture_strips_cdn_injected_instrumentation():
+    """Every page of the first delivery failed the self-containment gate on a
+    same-origin request to `/cdn-cgi/rum?`. Nothing in the captured HTML
+    referenced it — the capture's asset inventory never saw the URL — because
+    Cloudflare's beacon fabricates it at runtime. Only removing the beacon tag
+    stops the request, and `/cdn-cgi/*` is answered by the edge, so no capture
+    could mirror it either.
+
+    Asserted against the shipped suite's OUTPUT rather than restated here: this
+    checks the coverage still exists, which a copy of the assertions could not.
+    """
+    proc = _self_test("capture-wordpress-api.mjs")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    out = proc.stdout + proc.stderr
+    for case in (
+        "the Cloudflare beacon script is removed",
+        "a same-origin /cdn-cgi/ script is removed",
+        "the site's own scripts survive",
+    ):
+        assert f"ok   {case}" in out, f"coverage for {case!r} is gone:\n{out[-1500:]}"
+
+
+def test_the_capture_decodes_obfuscated_addresses_before_dropping_the_decoder():
+    """Cloudflare rewrites `mailto:` into `/cdn-cgi/l/email-protection#<hex>`
+    and ships the decoder from `/cdn-cgi/`, which a static host cannot serve.
+    Removing that script without decoding first would leave every obfuscated
+    address on a charity's contact page rendered as hex — so the decode is what
+    makes the strip safe, not a separate nicety."""
+    proc = _self_test("capture-wordpress-api.mjs")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    out = proc.stdout + proc.stderr
+    for case in (
+        "an obfuscated address span decodes to the real address",
+        "an email-protection href becomes a real mailto",
+        "a decode that does not yield an address leaves the markup untouched",
+    ):
+        assert f"ok   {case}" in out, f"coverage for {case!r} is gone:\n{out[-1500:]}"
+
+
+def test_the_capture_refuses_a_page_that_redirected_off_the_site():
+    """Delivery attempt 6 shipped `public/index.html` as a parked WordPress.com
+    landing page for a domain the operator had explicitly excluded, while the
+    other 588 pages were correct.
+
+    `redirect: 'follow'` means a 200 says nothing about whose page came back.
+    The source's WordPress declares `home` as a domain it does not serve, so it
+    answered its own root with a canonical redirect off-site and the capture
+    stored the stranger's page under the charity's URL. Every gate was green:
+    the page loaded, its assets resolved, and nothing about a 200 is suspicious.
+
+    A gap is visible; a substitution is not. Hence refuse, and say so.
+    """
+    proc = _self_test("capture-wordpress-api.mjs")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    out = proc.stdout + proc.stderr
+    for case in (
+        "isSiteHost REFUSES the stale home host \u2014 the parked-page case",
+        "classifyPageResponse REFUSES a 200 that redirected to the stale home host",
+        "classifyPageResponse skips a non-200 without calling it off-site",
+    ):
+        assert f"ok   {case}" in out, f"coverage for {case!r} is gone:\n{out[-1500:]}"
+
+
+def test_the_capture_brings_navigation_home_and_gates_on_what_it_missed():
+    """562 of 589 delivered pages navigated to the decommissioned domain.
+
+    The rewrite compared an entry's link against the page's raw href STRINGS,
+    and those are written in different alphabets whenever a site declares a
+    stale `home`: entries are normalized onto the serving host, the markup
+    still says the stale one. `present.has(e.link)` was false for every link on
+    the site, so not one was rewritten.
+
+    No gate could see it. The self-containment gate loads each page with the
+    source blocked, which exercises subresources; a nav href is fetched only on
+    a click, so a clone whose entire menu points off-site passes cleanly. The
+    front page is gated separately for the same reason a percentage cannot
+    express it \u2014 losing it costs 1 of 590 and every visitor sees it first.
+    """
+    proc = _self_test("capture-wordpress-api.mjs")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    out = proc.stdout + proc.stderr
+    for case in (
+        "normalizedLinkIndex resolves a STALE-host href onto the entry key",
+        "the old string comparison would have matched nothing",
+        "normalizedLinkIndex folds absolute, root-absolute and relative spellings together",
+        "captureVerdict fails a clone whose navigation still points at the stale host",
+        "captureVerdict does NOT fail on links to the serving domain \u2014 /feed/ has no local copy",
+        "captureVerdict names the front page as its own problem, not just a count",
+        "captureVerdict fails on a missing front page even when nothing else is wrong",
+    ):
+        assert f"ok   {case}" in out, f"coverage for {case!r} is gone:\n{out[-1500:]}"
+
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 if __name__ == "__main__":
