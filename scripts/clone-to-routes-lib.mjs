@@ -896,6 +896,98 @@ export function removeDeadConsentUi(html) {
 }
 
 /**
+ * Elements that stop a descendant `<footer>` being the document's contentinfo.
+ *
+ * `article`, `aside`, `main`, `nav` and `section` are the list HTML-AAM uses to
+ * decide whether `<footer>` maps to `contentinfo`, and the list axe implements.
+ * `blockquote` is added because WordPress core styles `.wp-block-quote footer`
+ * as a citation line: a footer there is attribution for the quote, not the page
+ * footer, and demoting it would silently drop that styling. No capture has
+ * produced one yet — `keptNested` is reported so that stays visible rather than
+ * becoming an assumption.
+ */
+const FOOTER_SCOPES = new Set(['article', 'aside', 'blockquote', 'main', 'nav', 'section']);
+
+/**
+ * Demote the captured page footer to a `<div>`, keeping its classes.
+ *
+ * Every captured page ends in the source theme's own footer — here Divi's
+ * `<footer class="et-l et-l--footer">`. That is the charity's design and it
+ * stays. What cannot stay is the *tag*: the root layout renders the FFC
+ * attribution footer after `{children}`, so a converted page ships two
+ * `<footer>` elements, the charity's first in document order.
+ *
+ * The measured cost is not an audit score — Lighthouse reads 100 on these
+ * pages, because both footers sit inside the layout's `<main>` and neither maps
+ * to `contentinfo` there. It is the fleet compliance probe, which asks
+ * `document.querySelector('footer, [role="contentinfo"]')` — a tag selector,
+ * which does not care about role scoping and returns the FIRST match. So the
+ * probe reads the charity's Divi footer, finds none of the five required policy
+ * links (they are in the FFC footer, second in the document), and fails the
+ * post-deploy smoke with "Footer missing required policy links".
+ *
+ * A `<div>` carrying the same classes renders identically: nothing in the
+ * captured CSS selects `footer` as an element (1,418 stylesheets scanned; the
+ * single hit is the HTML5 reset's `article,aside,footer,header,nav,section
+ * {display:block}`, which `div` already satisfies).
+ *
+ * Only footers at the top level of the fragment are demoted; one nested inside
+ * a scoping element is left alone and counted, per FOOTER_SCOPES above.
+ */
+export function demoteCapturedFooters(bodyHtml) {
+  if (typeof bodyHtml !== 'string') return { html: '', demoted: 0, keptNested: 0 };
+  // Comments are matched first so that markup quoted inside one is copied
+  // verbatim rather than opening a scope that never closes.
+  const token = /<!--[\s\S]*?-->|<(\/?)([a-zA-Z][a-zA-Z0-9-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>/g;
+  let out = '';
+  let last = 0;
+  let scopeDepth = 0;
+  let demoted = 0;
+  let keptNested = 0;
+  // One entry per open <footer>; true when that footer was demoted, so the
+  // matching close tag is rewritten to agree with it.
+  const openFooters = [];
+  let m;
+  while ((m = token.exec(bodyHtml)) !== null) {
+    out += bodyHtml.slice(last, m.index);
+    last = token.lastIndex;
+    const [whole, closing, rawName, attrs] = m;
+    if (rawName === undefined) {
+      out += whole; // a comment
+      continue;
+    }
+    const name = rawName.toLowerCase();
+    if (FOOTER_SCOPES.has(name)) {
+      if (closing) scopeDepth = Math.max(0, scopeDepth - 1);
+      else scopeDepth += 1;
+      out += whole;
+      continue;
+    }
+    if (name !== 'footer') {
+      out += whole;
+      continue;
+    }
+    if (closing) {
+      // A stray `</footer>` with nothing open is left as it was found; guessing
+      // at it would mean rewriting a tag whose opener we never saw.
+      const wasDemoted = openFooters.length ? openFooters.pop() : false;
+      out += wasDemoted ? '</div>' : whole;
+      continue;
+    }
+    if (scopeDepth === 0) {
+      demoted += 1;
+      openFooters.push(true);
+      out += `<div${attrs}>`;
+    } else {
+      keptNested += 1;
+      openFooters.push(false);
+      out += whole;
+    }
+  }
+  return { html: out + bodyHtml.slice(last), demoted, keptNested };
+}
+
+/**
  * Remove what the root layout already provides, so the page has one of each.
  *
  * The capture gives the content wrapper `id="main-content" role="main"` so that
@@ -934,7 +1026,14 @@ export function stripLayoutDuplicates(bodyHtml) {
     removedScripts += 1;
     return '';
   });
-  return { html: out, removedMain, removedScripts };
+  const footers = demoteCapturedFooters(out);
+  return {
+    html: footers.html,
+    removedMain,
+    removedScripts,
+    demotedFooters: footers.demoted,
+    keptNestedFooters: footers.keptNested,
+  };
 }
 
 /* ------------------------------------------------------------------ *
@@ -1849,6 +1948,101 @@ function selfTest() {
     'a page with neither is left exactly as it was',
     stripLayoutDuplicates('<div><p>hi</p></div>').html,
     '<div><p>hi</p></div>',
+  );
+
+  // --- the captured page footer ----------------------------------------
+  // The shape every converted page actually has: Divi's theme-builder footer,
+  // last in the fragment, which the layout then follows with the FFC one.
+  const divi = demoteCapturedFooters(
+    '<div class="et-l"><p>body</p></div><footer class="et-l et-l--footer"><p>© 2026</p></footer>',
+  );
+  eq('the captured footer is no longer a footer element', /<footer/i.test(divi.html), false);
+  eq('its closing tag agrees', /<\/footer>/i.test(divi.html), false);
+  eq(
+    'it becomes a div carrying exactly the same attributes',
+    divi.html.includes('<div class="et-l et-l--footer"><p>© 2026</p></div>'),
+    true,
+  );
+  eq('the rest of the fragment is untouched', divi.html.startsWith('<div class="et-l">'), true);
+  eq('the demotion is counted', [divi.demoted, divi.keptNested], [1, 0]);
+
+  // The reason the demotion is scoped rather than a blanket replace: WordPress
+  // core styles `.wp-block-quote footer` as the citation line.
+  const quoted = demoteCapturedFooters(
+    '<blockquote class="wp-block-quote"><p>q</p><footer>— Someone</footer></blockquote>' +
+      '<footer class="et-l--footer">page</footer>',
+  );
+  eq(
+    'a footer inside a blockquote stays a footer',
+    quoted.html.includes('<footer>— Someone</footer>'),
+    true,
+  );
+  eq(
+    'while the page footer beside it is still demoted',
+    quoted.html.includes('<div class="et-l--footer">page</div>'),
+    true,
+  );
+  eq('and the nested one is reported, not silently skipped', [quoted.demoted, quoted.keptNested], [
+    1, 1,
+  ]);
+  eq(
+    'a footer inside a <section> is nested too',
+    demoteCapturedFooters('<section><footer>a</footer></section>').html,
+    '<section><footer>a</footer></section>',
+  );
+  eq(
+    'closing the scope re-exposes the top level',
+    demoteCapturedFooters('<nav><footer>a</footer></nav><footer>b</footer>').html,
+    '<nav><footer>a</footer></nav><div>b</div>',
+  );
+
+  // Uppercase and attribute-bearing forms are the same element.
+  eq(
+    'the tag name is matched case-insensitively',
+    demoteCapturedFooters('<FOOTER id="f">x</FOOTER>').html,
+    '<div id="f">x</div>',
+  );
+  // A `>` inside a quoted attribute does not end the tag. On a *footer* open
+  // tag that is unobservable — whatever the attribute scan drops is copied
+  // through verbatim as the next run of text, so the reassembled output is the
+  // same either way, and a test written there passes against a naive `[^>]*`
+  // scan too. It is only observable through a scope tag, where a quoted closing
+  // tag read as a real one drops the depth back to zero and the footer nested
+  // inside gets demoted.
+  eq(
+    'a quoted > does not end a scope tag early',
+    demoteCapturedFooters('<section data-x="a></section>"><footer>x</footer></section>').html,
+    '<section data-x="a></section>"><footer>x</footer></section>',
+  );
+  // A quoted `<section>` in a comment must not open a scope that never closes,
+  // or every footer after it in the document would be read as nested and kept.
+  eq(
+    'markup quoted inside a comment does not open a scope',
+    demoteCapturedFooters('<!-- <section> --><footer>x</footer>').html,
+    '<!-- <section> --><div>x</div>',
+  );
+  eq(
+    'a stray closing tag is left as it was found',
+    demoteCapturedFooters('</footer><p>x</p>').html,
+    '</footer><p>x</p>',
+  );
+  eq(
+    'a footer inside the demoted footer is demoted too, leaving none',
+    /<\/?footer/i.test(demoteCapturedFooters('<footer><footer>a</footer></footer>').html),
+    false,
+  );
+  eq(
+    'a fragment with no footer at all is returned byte-identical',
+    demoteCapturedFooters('<div><p>hi</p></div>').html,
+    '<div><p>hi</p></div>',
+  );
+  eq(
+    'stripLayoutDuplicates reports the demotion it delegates',
+    (() => {
+      const s = stripLayoutDuplicates('<p>x</p><footer class="et-l--footer">f</footer>');
+      return [/<footer/i.test(s.html), s.demotedFooters, s.keptNestedFooters];
+    })(),
+    [false, 1, 0],
   );
 
   // The receiving repos format with `singleQuote: true` and check it in CI.
