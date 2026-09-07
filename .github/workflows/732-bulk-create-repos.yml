@@ -268,6 +268,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Create each repo from the template
+        id: create
         shell: pwsh
         # IN_CLEAN_DOMAINS is preflight's OUTPUT, itself derived from the free-text
         # Domains input — the exact hop check-workflow-laundered-input-interpolation.py
@@ -318,9 +319,15 @@ jobs:
           }
 
       - name: Grant FFC-ORGWIDE-* tier teams (public repos only)
-        # always() so a partial-failure throw above (which fails THIS job) still lets the
-        # teams get granted on whichever repos DID get created.
-        if: ${{ always() && inputs.DryRun != true && inputs.Visibility == 'public' }}
+        # always() so a partial-failure throw in the create step (which fails THIS job)
+        # still lets the teams get granted on whichever repos DID get created -- but
+        # gated on steps.create.outcome so a bare always() doesn't run this against a
+        # never-populated GH_TOKEN when an EARLIER step (Azure login / Key Vault load)
+        # failed and the create step was skipped entirely (#899 -- an unconditional
+        # always() step that authenticates is the exact defect class that issue fixed).
+        if:
+          ${{ always() && steps.create.outcome != 'skipped' && inputs.DryRun != true &&
+          inputs.Visibility == 'public' }}
         shell: pwsh
         # Same env-not-interpolation rule as the create step above.
         env:
