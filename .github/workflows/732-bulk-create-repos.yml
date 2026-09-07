@@ -229,6 +229,9 @@ jobs:
             exit 1
           fi
           echo "::add-mask::$token"
+          # A 200 proves the token AUTHENTICATES. It proves nothing about SCOPE -- a
+          # read-scoped PAT answers 200 here and 403 on a write -- so a green probe is
+          # not a licence to assume the later write will work.
           hdrs="$(mktemp)"
           code="$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' \
             -H "Authorization: Bearer $token" \

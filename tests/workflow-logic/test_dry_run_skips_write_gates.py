@@ -194,6 +194,14 @@ KNOWN_UNGUARDED = {
     ("701-website-provision.yml", "repo"),
     ("701-website-provision.yml", "content"),
     ("720-create-repo.yml", "create-repo"),
+    # Same shape and same #848 block as 720's create-repo immediately above:
+    # 732 loops the identical Create-GitHubRepo.ps1 -DryRun rehearsal once per
+    # domain, and its own preflight job (unlike 701's dns_preview) never
+    # invokes that script — it only runs the collision/sibling checks — so it
+    # is not a qualifying rehearsal counterpart under
+    # test_a_skipped_job_has_a_real_rehearsal_counterpart either. Move both
+    # once #848 makes github-prod-read's credential usable.
+    ("732-bulk-create-repos.yml", "create-repos"),
     # REHEARSAL-INSIDE: the dry run is the preview that the LIVE run's preflight
     # requires as evidence within 48h. Skipping it defeats the control.
     ("736-repo-archive.yml", "archive"),
