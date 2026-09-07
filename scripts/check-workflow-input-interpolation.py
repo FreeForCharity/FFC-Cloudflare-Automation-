@@ -376,9 +376,22 @@ _ENV_ASSIGN = re.compile(r"""["']([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|<<)""")
 # `{ echo "NAME<<$d"; …; } >> "$GITHUB_ENV"` — the bash form used by 120, 701,
 # 720 and friends. The closing brace must be followed by the redirect, which is
 # what stops the non-greedy match from ending early on a `${d}` inside the block.
-_BRACE_TO_GITHUB_ENV = re.compile(
-    r"\{(.*?)\}\s*>>\s*[\"']?\$\{?GITHUB_ENV\}?[\"']?", re.DOTALL
-)
+#
+# Parameterised on the FILE VARIABLE rather than hard-coded to `GITHUB_ENV`,
+# because `GITHUB_OUTPUT` is written with byte-identical syntax and the sibling
+# guard `check-workflow-laundered-input-interpolation.py` (#1233) needs the same
+# four shapes read for it. Sharing the parser is the point: two copies would
+# drift, and the copy that fell behind would be the one that reads clean.
+_BRACE_TO_FILE_VAR: dict[str, re.Pattern] = {}
+
+
+def _brace_to_file_var(variable: str) -> re.Pattern:
+    if variable not in _BRACE_TO_FILE_VAR:
+        _BRACE_TO_FILE_VAR[variable] = re.compile(
+            r"\{(.*?)\}\s*>>\s*[\"']?\$\{?" + re.escape(variable) + r"\}?[\"']?",
+            re.DOTALL,
+        )
+    return _BRACE_TO_FILE_VAR[variable]
 
 # `- uses: ./.github/actions/<name>` — a composite action in THIS repo, whose
 # steps run in the caller's job and whose `GITHUB_ENV` writes therefore land in
@@ -407,11 +420,11 @@ def looks_like_credential(name: str, value: str | None = None) -> bool:
     return bool(_CREDENTIAL_NAME.search(name))
 
 
-def _heredoc_bodies_to_github_env(body: str) -> list[str]:
+def _heredoc_bodies_to_file_var(body: str, variable: str = "GITHUB_ENV") -> list[str]:
     """Bodies of `cat <<EOF >> "$GITHUB_ENV"` blocks.
 
-    Only entered for a line that mentions GITHUB_ENV and `<<` but carries NO
-    literal assignment of its own. Without that second condition the pwsh line
+    Only entered for a line that mentions the file variable and `<<` but carries
+    NO literal assignment of its own. Without that second condition the pwsh line
     `"FRAUD_REVIEW_JSON<<FRAUD_EOF" | Out-File … $env:GITHUB_ENV` — a complete
     write, already handled — would be read as OPENING a heredoc and would then
     swallow the rest of the step.
@@ -421,7 +434,7 @@ def _heredoc_bodies_to_github_env(body: str) -> list[str]:
     index = 0
     while index < len(lines):
         line = lines[index]
-        if "GITHUB_ENV" in line and "<<" in line and not _ENV_ASSIGN.search(line):
+        if variable in line and "<<" in line and not _ENV_ASSIGN.search(line):
             opener = re.search(r"<<-?\s*[\"']?([A-Za-z_][A-Za-z0-9_]*)[\"']?", line)
             if opener:
                 delimiter = opener.group(1)
@@ -448,19 +461,20 @@ def _brace_balanced_body(text: str, open_at: int) -> str:
     return text[open_at:]
 
 
-def _helper_exported_names(body: str) -> set[str]:
-    """Names passed as `-Name 'X'` to a pwsh helper that writes to GITHUB_ENV.
+def _helper_exported_names(body: str, variable: str = "GITHUB_ENV") -> set[str]:
+    """Names passed as `-Name 'X'` to a pwsh helper that writes to the file var.
 
     The `*-from-kv` composite actions all funnel their writes through one
     `Add-EnvVar` whose `$Name` is a parameter, so the literal name exists only at
     the CALL SITE. Resolved per-function rather than by sweeping every `-Name` in
-    the body, so a helper that does NOT touch GITHUB_ENV contributes nothing.
+    the body, so a helper that does NOT touch the file variable contributes
+    nothing.
     """
     names: set[str] = set()
     for match in _PS_FUNCTION.finditer(body):
         function = match.group(1)
         definition = _brace_balanced_body(body, match.end() - 1)
-        if "GITHUB_ENV" not in definition:
+        if variable not in definition:
             continue
         for call in re.finditer(
             rf"\b{re.escape(function)}\b[^\r\n]*?-Name\s+[\"']([A-Za-z_][A-Za-z0-9_]*)[\"']",
@@ -470,8 +484,8 @@ def _helper_exported_names(body: str) -> set[str]:
     return names
 
 
-def exported_env_names(body: str) -> set[str]:
-    """Every env var name a script body writes to `$GITHUB_ENV`.
+def exported_names(body: str, variable: str = "GITHUB_ENV") -> set[str]:
+    """Every name a script body writes to `$<variable>`.
 
     Four shapes, all live in this repo:
 
@@ -479,22 +493,36 @@ def exported_env_names(body: str) -> set[str]:
       pwsh heredoc   `"FRAUD_REVIEW_JSON<<EOF"    | Out-File … $env:GITHUB_ENV`
       bash group     `{ echo "GH_TOKEN<<$d"; … } >> "$GITHUB_ENV"`
       pwsh helper    `Add-EnvVar -Name 'WHMCS_API_SECRET' -Value $secret`
+
+    `variable` selects which of the two run-file protocols is read. The syntax
+    is identical for both, which is why the sibling laundering guard (#1233)
+    calls this with `GITHUB_OUTPUT` rather than carrying its own copy.
     """
-    if "GITHUB_ENV" not in body:
+    if variable not in body:
         return set()
     names: set[str] = set()
     for line in body.splitlines():
-        if "GITHUB_ENV" in line:
+        if variable in line:
             names |= {m.group(1) for m in _ENV_ASSIGN.finditer(line)}
-    for block in _BRACE_TO_GITHUB_ENV.findall(body):
+    for block in _brace_to_file_var(variable).findall(body):
         names |= {m.group(1) for m in _ENV_ASSIGN.finditer(block)}
-    for block in _heredoc_bodies_to_github_env(body):
+    for block in _heredoc_bodies_to_file_var(body, variable):
         for line in block.splitlines():
             assignment = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*=", line)
             if assignment:
                 names.add(assignment.group(1))
-    names |= _helper_exported_names(body)
+    names |= _helper_exported_names(body, variable)
     return names
+
+
+def exported_env_names(body: str) -> set[str]:
+    """Every env var name a script body writes to `$GITHUB_ENV`.
+
+    The `GITHUB_ENV` binding of `exported_names`, kept as its own name because
+    the credential-reachability half of this module (#1188) is about the
+    environment specifically and reads better saying so.
+    """
+    return exported_names(body, "GITHUB_ENV")
 
 
 def _local_action_steps(uses: str, depth: int = 0) -> list[dict]:
@@ -929,7 +957,34 @@ KNOWN_UNGUARDED: dict[str, tuple[str, ...]] = {
         "min_days_to_expiry",
         "post_reg_lock_days",
     ),
-    "116-domain-transfer-epp-probe.yml": ("domain",),
+    # 116-domain-transfer-epp-probe.yml burned down: `domain` now reaches the one
+    # pwsh body through step-level `env:` (IN_DOMAIN), and the job-summary line that
+    # re-interpolated it reads the local `$domain` instead. It runs on whmcs-prod
+    # and can ask a registrar to release a transfer auth code; the WHMCS credential
+    # in reach is the workflow's ONLY credential and arrives through GITHUB_ENV from
+    # `whmcs-secrets-from-kv`, invisible to both the L213 `env:` read and the #1141
+    # `secrets.` grep.
+    #
+    # Both of its call sites sat in DOUBLE quotes, so unlike 118 no quote breakout
+    # was needed — `$( )` expands there. Measured on the shipped body with `domain`
+    # = `example.org$($null = Set-Content -Path <sentinel> -Value
+    # $env:WHMCS_API_SECRET)`: secret stolen, callee still handed a legal
+    # `Domain=[example.org]`, step exited 0. `$null =` is what keeps the value legal
+    # and the log ordinary.
+    #
+    # It is also the lane that BOUNDS L214 rather than re-confirming it. Every
+    # earlier lane's fail-closed guard closed a silent shift the remedy introduced;
+    # here it closes nothing silent, because every other element this body splats is
+    # a SWITCH and a switch cannot absorb a value. Measured with the guard removed:
+    # unset -> `Missing an argument for parameter 'Domain'`, empty -> `Cannot bind
+    # argument to parameter 'Domain' because it is an empty string`, both rc 1. The
+    # guard stays because it attributes the fault to the missing `env:` mapping
+    # instead of to the callee — but "L214 shift" is not what it prevents here, and
+    # a lane that copied 118's reasoning would have said so untruthfully.
+    # Ledger L260.
+    #
+    # `mode` (choice) and `show_code` (boolean) stay interpolated and are NOT
+    # findings.
     "117-domain-transfer-verify.yml": ("domain",),
     # 118-whmcs-domain-lock.yml burned down: `domain` now reaches the one pwsh body
     # through step-level `env:` (IN_DOMAIN). It runs on whmcs-prod and changes a
