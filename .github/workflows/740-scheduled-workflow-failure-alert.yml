@@ -120,6 +120,21 @@ jobs:
             // as health (same stance as the job-list catch below). `why` carries the honest
             // reason into the alert so a reader is never told "never succeeded" about a
             // workflow whose history merely could not be read.
+            //
+            // `status: 'success'` IS a valid filter here, though it reads like a mistake:
+            // this endpoint's `status` accepts CONCLUSION values as well as status ones, and
+            // filters server-side. Measured against the live API on 2026-09-07, on 703's own
+            // run list: `status=success` -> 200, total_count 4, all four `conclusion:success`
+            // (the cancelled and waiting runs excluded); `status=completed` -> 200, total 10.
+            // So this is one small query, not a page walk plus a client-side filter.
+            // Recorded because it was raised in review as a likely bug and is cheap to
+            // re-doubt otherwise.
+            //
+            // The failure mode if that ever changed is also measured, and it is the safe
+            // direction: an UNSUPPORTED value does not 4xx, it returns 200 with an empty
+            // list (`status=bogus_value` -> total_count 0). Empty reads as "never green"
+            // here, which escalates to an alert. A wrong alert is visible and correctable;
+            // a wrong suppression is the six-week silence this whole change exists to end.
             const greenAge = async (workflowId, wfName) => {
               try {
                 const res = await github.rest.actions.listWorkflowRuns({
