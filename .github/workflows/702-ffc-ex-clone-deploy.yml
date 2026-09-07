@@ -443,6 +443,7 @@ jobs:
           TARGET_REPO: ${{ steps.target.outputs.repo }}
           TARGET_BRANCH: ${{ steps.target.outputs.branch }}
         run: |
+          set -euo pipefail
           if [ -z "${TARGET_REPO:-}" ] || [ -z "${TARGET_BRANCH:-}" ]; then
             echo "::error::TARGET_REPO / TARGET_BRANCH is empty — the 'Resolve target repo' step published nothing."
             exit 1
