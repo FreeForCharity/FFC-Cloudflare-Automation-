@@ -3201,7 +3201,7 @@
     "In WPMUDEV": "No",
     "Server In Use": "HostPapa",
     "Old Server Abandoned?": "No",
-    "Notes": "Alias domain, 301-redirected to aprilhansen.com (already migrated, live at staging.aprilhansen.com). Single-page memorial site with no distinct content - no migration needed (epic #702, 2026-07-26).",
+    "Notes": "Alias domain serving byte-identical content to the already-migrated aprilhansen.com (single-page memorial site, no distinct content). A 301 redirect to aprilhansen.com was dispatched (workflow 111) but is not yet live - still HTTP 200 as of 2026-09-07 (curl-verified), likely awaiting the cloudflare-prod-write approval gate. No migration needed either way (epic #702, 2026-07-26).",
     "Cloudflare IP": "216.222.200.253",
     "Is In Cloudflare": "Yes",
     "Repo URL": "",
