@@ -344,6 +344,9 @@ BURNED_DOWN = (
     "119-bulk-staging-cname-github-pages.yml",
     "205-whmcs-ticket-open.yml",
     "101-domain-status.yml",
+    "118-whmcs-domain-lock.yml",
+    "102-domain-add-ffc-cloudflare-and-whmcs.yml",
+    "116-domain-transfer-epp-probe.yml",
 )
 
 
@@ -532,6 +535,74 @@ def test_the_frozen_counts_are_what_1080_reconciles_to():
                the callee was then handed a legal domain, and the step exited 0.
                Filed as #1208; ledger L248.
       = 23 / 8
+      -118     burned down: `domain` moved to step-level `env:` (IN_DOMAIN). It
+               runs on whmcs-prod and CHANGES a registrar lock on a production
+               domain, with the WHMCS credential arriving through GITHUB_ENV
+               from `whmcs-secrets-from-kv` — the workflow's only credential,
+               invisible to both the L213 `env:` read and the #1141 `secrets.`
+               grep, as 205's was. Its injection point sat in SINGLE quotes, so
+               the `$( )` payload is inert and the control had to close the
+               quote and the hashtable and re-open both. Measured: the WHMCS
+               secret was written to a file, the callee was then handed a legal
+               domain, and the step exited 0. It is the first lane where the
+               fail-closed guard fixes a defect the interpolation was HIDING
+               rather than one the remedy introduced: the body splats a
+               hashtable onto a native `pwsh -File`, hashtable order is
+               undefined, and a blank `Domain` was dropped so `-Domain`
+               swallowed the next token — 3 of 8 runs bound
+               `Domain=[-DryRun:True]` with `DryRun=[False]` at exit 0, the
+               other 5 failed loudly. Ledger L254. `action` (choice) and
+               `dry_run` (boolean) stay interpolated and are not findings.
+      = 22 / 7
+      -102     burned down: `domain` moved to step-level `env:` in both pwsh and
+               both bash bodies, `domain` + `issue_number` in the
+               `github-script` body. FOUR jobs, THREE environments —
+               whmcs-prod twice, cloudflare-prod-write twice,
+               cloudflare-prod-read once — so one payload ran under two
+               production credential families on one approval, with both the
+               WHMCS and the Cloudflare credentials arriving through GITHUB_ENV
+               and so invisible to the L213 `env:` read and the #1141
+               `secrets.` grep alike.
+
+               It is the lane that showed a freeze entry is not the whole call
+               site. The four `inputs.` sites this list named are the FIRST hop:
+               `inputs.domain` is published as a step output and
+               re-interpolated into SEVEN more script bodies, and
+               `.Trim().ToLowerInvariant().Trim('.')` removes nothing that
+               matters. Measured — with `Metadata` remedied the house way, the
+               payload arrived as data THERE, went verbatim into GITHUB_OUTPUT,
+               and executed one step later at
+               `$domain = "${{ steps.meta.outputs.domain }}"`: WHMCS secret
+               stolen, `-Domain` still bound to a legal `example.org`, exit 0.
+               So a lane fixing only what this guard can see would have removed
+               the entry, gone green, and left the injection working. The guard
+               is defined over `inputs.X` and cannot see the laundering; filed
+               as #1233 rather than absorbed here. Ledger L255.
+      = 21 / 6
+      -116     burned down: `domain` moved to step-level `env:`, and the
+               job-summary line that re-interpolated the SAME input reads the
+               local `$domain` instead — two call sites off one entry, both in
+               DOUBLE quotes, on whmcs-prod. No quote breakout was needed:
+               `$( )` expands there. Measured on the shipped body with `domain`
+               = `example.org$($null = Set-Content -Path <sentinel> -Value
+               $env:WHMCS_API_SECRET)` — WHMCS secret stolen, callee still
+               handed a legal `Domain=[example.org]`, step exited 0. The
+               credential is the workflow's only one and arrives through
+               GITHUB_ENV from `whmcs-secrets-from-kv`, so both recommended
+               sweeps read the file as holding nothing.
+
+               It is the lane that BOUNDS L214 instead of re-confirming it.
+               Every earlier lane's fail-closed guard closed a silent shift the
+               remedy introduces; here nothing silent exists to close, because
+               every other element the body splats is a SWITCH and a switch
+               cannot absorb a value. Measured with the guard stripped: unset ->
+               `Missing an argument for parameter 'Domain'`, empty -> `Cannot
+               bind argument to parameter 'Domain' because it is an empty
+               string`, both rc 1. The guard stays for attribution, not for the
+               shift — and saying otherwise would have been a claim inherited
+               from 118 rather than measured here. Ledger L260. `mode` (choice)
+               and `show_code` (boolean) stay interpolated and are not findings.
+      = 20 / 5
 
     Pinned so that a silent collapse in either direction fails. If someone
     narrows the type rule back to string-only, this says which workflows just

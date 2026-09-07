@@ -47,6 +47,37 @@
     non-zero, which is what makes it easy to misread: it looks like "the check ran and flagged the
     `.py`", not like "nothing you cared about was checked". A batched verification couples its
     inputs — one unparseable file voids the rest. Ledger **L240**.
+  - **…and anchor the check at the repo root, because `.` follows the Bash tool's cwd, which
+    persists between calls.** Same failure as L240, reached from the other side: there a missing
+    flag aborted the run before the Markdown, here a drifted cwd left it out of the file set
+    entirely. Verifying a ledger edit on #1242, the pre-commit `prettier --check . --ignore-unknown`
+    printed `All matched files use Prettier code style!` and exited 0; CI then failed
+    `Check formatting (Prettier)` naming `docs/lessons-ledger.md`. The cwd had moved to
+    `tests/workflow-logic` **two Bash calls earlier**, in a command that ran a test module — the
+    `cd` persists, the edit did not care, and `.` resolved to a directory whose only Markdown was an
+    already-clean README. Measured: run from that subdirectory the invocation emits a
+    **byte-identical** success line to a full-repo pass, so nothing in the output distinguishes "400
+    files clean" from "you checked the wrong subtree". **Fix the cwd, not the argument** — `cd` to
+    the root and run CI's own command:
+
+    ```bash
+    ( cd "$(git rev-parse --show-toplevel)" && npx --yes prettier@3.8.1 --check . --ignore-unknown )
+    ```
+
+    **Do NOT pass the root as the PATH argument instead** — the obvious one-liner
+    (`prettier --check "$(git rev-parse --show-toplevel)"`) is wrong, and this note shipped it wrong
+    for one commit before it was measured. `.prettierignore` patterns are resolved against the
+    **cwd**, not against the target path, so from a subdirectory the ignore file stops applying:
+    measured from `tests/workflow-logic`, that form reports **42 files** needing formatting — 31
+    under `whmcs/`, 7 under `assets/`, the rest scattered — every one of them inside a path
+    `.prettierignore` lists and CI considers clean. The `cd` form on the same tree exits 0. So the
+    two spellings fail in opposite directions from the same wrong cwd: `.` under-reports silently (a
+    clean-looking pass over the wrong subtree), an absolute path over-reports loudly (42 phantom
+    failures). The second is the safer error and still costs a session chasing them.
+
+    Not a ledger row: `docs/lessons-ledger.md` had 1,051 bytes of headroom under the 1 MiB
+    large-blob guard when this was found, and the row that would have recorded it is what pushed the
+    file 2,115 bytes over. Filed as its own issue instead.
 
 ## Verifying tests: CI is authoritative, local runs may be false-red
 
@@ -1016,9 +1047,42 @@ Two things follow, and they are easy to collapse into one:
    the file that would fix it is on the operator's workstation and in no repository.
 
 The fix is a `hooks` block in the Conductor workspace's own settings pointing at a clone's
-`.claude/hooks/`. It is @clarkemoyer's call — it changes how the privileged session behaves, and a
-misconfigured guard there blocks the Conductor mid-run rather than an agent mid-task. Ledger
-**L218**.
+`.claude/hooks/`. Ledger **L218**.
+
+### The hub now ships that block, and a way to prove it loaded (#1042)
+
+The config is no longer an untracked file on one workstation. Two artifacts, both reviewable:
+
+- **`.claude/conductor/settings.template.json`** — the workspace's `hooks` block, with the clone's
+  path as a `__HUB_CLONE__` placeholder. It is deliberately **absolute**, not `$CLAUDE_PROJECT_DIR`:
+  that variable is the _session's_ project root, which for the Conductor is the workspace, so
+  copying the hub's own `settings.json` across produces valid JSON with a real `hooks` block that
+  resolves to nothing. That near-miss is the one to remember — it passes every check that stops at
+  config presence.
+- **`scripts/verify-conductor-hooks.py`** — renders the template (`--render`) and, every bootstrap,
+  **probes the guard the config points at**: one command that must be blocked (the run-134 L50
+  shape) and one that must be allowed (`git status --porcelain`). Both verdicts have to land, so
+  neither an `exit 0` stub nor an `exit 2` stub passes; any other exit code is reported as
+  _crashed_, never as a detection. Exit 0/1, and it prints a `HOOKS: …` line in **both** directions
+  for the run's START comment — a verifier that only speaks on failure leaves "guarded" and "the
+  check never ran" identical in the record.
+
+```bash
+python3 scripts/verify-conductor-hooks.py --workspace "$PWD"          # bootstrap check
+python3 scripts/verify-conductor-hooks.py --render --workspace <ws>   # one-time wiring
+```
+
+`$PWD` is safe here even though git-bash spells it `/c/...`: the script translates an MSYS
+`/<drive>/` prefix to `C:/` **on Windows only**. That translation is not cosmetic — native Windows
+Python reads a leading `/c/` as _drive-relative_ and resolves `/c/Users/x` to `C:\c\Users\x`, so
+without it a correctly-wired workspace reports NOT WIRED, and `--render` writes the settings into a
+directory the real session never reads while reporting success. Same trap as the `/c/...` note
+above, reached through an operator's `$PWD` rather than through a heredoc.
+
+Full reasoning, and why option (c) — moving the Conductor's project root to the hub clone — was left
+to @clarkemoyer rather than taken: `docs/runbooks/conductor-hook-wiring.md`. That option changes how
+the privileged session is launched, and a misconfigured guard there blocks the Conductor mid-run
+rather than an agent mid-task.
 
 ## Review threads are GraphQL-only — `--json reviewThreads` is not a field (validated 2026-07-30)
 
