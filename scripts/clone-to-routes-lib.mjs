@@ -909,7 +909,7 @@ export function removeDeadConsentUi(html) {
 const FOOTER_SCOPES = new Set(['article', 'aside', 'blockquote', 'main', 'nav', 'section']);
 
 /**
- * Demote the captured page footer to a `<div>`, keeping its classes.
+ * Demote the captured page footer to a `<div>`, keeping every attribute.
  *
  * Every captured page ends in the source theme's own footer — here Divi's
  * `<footer class="et-l et-l--footer">`. That is the charity's design and it
@@ -926,7 +926,12 @@ const FOOTER_SCOPES = new Set(['article', 'aside', 'blockquote', 'main', 'nav', 
  * links (they are in the FFC footer, second in the document), and fails the
  * post-deploy smoke with "Footer missing required policy links".
  *
- * A `<div>` carrying the same classes renders identically: nothing in the
+ * The attribute string is copied verbatim, not filtered down to `class` — an
+ * id, a `data-*` hook or an inline `style` on the captured footer is part of
+ * how the page renders, and dropping any of it would be a silent change to the
+ * charity's markup.
+ *
+ * A `<div>` carrying those attributes renders identically: nothing in the
  * captured CSS selects `footer` as an element (1,418 stylesheets scanned; the
  * single hit is the HTML5 reset's `article,aside,footer,header,nav,section
  * {display:block}`, which `div` already satisfies).
@@ -1965,6 +1970,16 @@ function selfTest() {
   );
   eq('the rest of the fragment is untouched', divi.html.startsWith('<div class="et-l">'), true);
   eq('the demotion is counted', [divi.demoted, divi.keptNested], [1, 0]);
+  // Not just `class`: an id, a data-* hook or an inline style on the captured
+  // footer is part of how the page renders. The attribute string is copied
+  // verbatim, and only a case carrying more than a class can show that.
+  eq(
+    'every attribute survives the demotion, not only the class',
+    demoteCapturedFooters(
+      '<footer id="main-footer" class="et-l" data-et-parallax="on" style="color:#fff">x</footer>',
+    ).html,
+    '<div id="main-footer" class="et-l" data-et-parallax="on" style="color:#fff">x</div>',
+  );
 
   // The reason the demotion is scoped rather than a blanket replace: WordPress
   // core styles `.wp-block-quote footer` as the citation line.
@@ -1982,9 +1997,11 @@ function selfTest() {
     quoted.html.includes('<div class="et-l--footer">page</div>'),
     true,
   );
-  eq('and the nested one is reported, not silently skipped', [quoted.demoted, quoted.keptNested], [
-    1, 1,
-  ]);
+  eq(
+    'and the nested one is reported, not silently skipped',
+    [quoted.demoted, quoted.keptNested],
+    [1, 1],
+  );
   eq(
     'a footer inside a <section> is nested too',
     demoteCapturedFooters('<section><footer>a</footer></section>').html,
