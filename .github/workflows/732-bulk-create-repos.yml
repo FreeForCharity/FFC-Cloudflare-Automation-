@@ -69,8 +69,15 @@ on:
 permissions:
   contents: read
 
-# Serialize: two bulk batches (or a bulk batch and a single 720 create) must not race
-# the same org-repo-list snapshot or collide on an in-flight name.
+# Serialize: two bulk batches must not race the same org-repo-list snapshot or
+# collide on an in-flight name. This does NOT serialize against a single 720
+# create — 720 declares no concurrency group of its own, so a 720 dispatch and
+# a 732 batch can still overlap. That gap is bounded, not open: each domain's
+# preflight-to-create window can race a same-named create elsewhere, but the
+# failure mode is a rejected `gh repo create` for that one domain (caught by
+# the per-domain try/catch below and reported in the summary), never a
+# corrupted or duplicated repo — the collision protection that actually
+# matters is GitHub's own uniqueness constraint on the create call.
 concurrency:
   group: bulk-create-repos
   cancel-in-progress: false
@@ -190,7 +197,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
           if [ ${#clean[@]} -eq 0 ]; then
-            echo "::error::No domains are free to create — every requested domain already has a repo or a sibling match (Force=true bypasses the sibling check only, never the exists check)."
+            echo "::error::No domains are free to create — all $skipped requested domain(s) were skipped. See the per-domain verdicts in the job summary: each is either an existing repo, a sibling-domain match, or could not be verified (a transient API error, which Force=true does NOT bypass — only the sibling check is skippable)."
             exit 1
           fi
 
