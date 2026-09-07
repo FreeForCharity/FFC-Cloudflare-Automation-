@@ -13,3 +13,16 @@
 # them; listed so that a legitimate theme refresh is not blocked.
 whmcs/theme/six_ffc/*
 whmcs/theme/six_ffc/**
+
+# docs/lessons-ledger.md: the durable lessons record. AGENTS.md requires a row
+# in the same PR as any fix that surprised somebody, so this file grows on a
+# large share of PRs and can only ever get bigger. It crossed 1 MiB on #1224
+# (main was 1041982 bytes, ~6.6 KiB of headroom, and three new rows crossed it).
+#
+# Trimming a row does NOT shrink it -- prettier pads table cells back to the
+# column width, measured: halving one cell left the row byte-identical in
+# length. Only deleting rows would help, and deleting lessons is the one thing
+# this file exists to prevent. Splitting or archiving the ledger is the real
+# fix and is tracked separately; this entry keeps the guard useful for the
+# binaries it was written for instead of blocking every ledger PR.
+docs/lessons-ledger.md
