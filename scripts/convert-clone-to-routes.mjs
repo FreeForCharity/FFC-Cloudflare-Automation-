@@ -280,6 +280,8 @@ function main() {
     genericLinksNamed: 0,
     iframesTitled: 0,
     scriptsRemoved: 0,
+    footersDemoted: 0,
+    footersKeptNested: 0,
     consentUiRemoved: 0,
     consentUiBytes: 0,
     headDropped: 0,
@@ -331,6 +333,8 @@ function main() {
     const stripped = stripLayoutDuplicates(out);
     out = stripped.html;
     tally.scriptsRemoved += stripped.removedScripts;
+    tally.footersDemoted += stripped.demotedFooters;
+    tally.footersKeptNested += stripped.keptNestedFooters;
     const consent = removeDeadConsentUi(out);
     out = consent.html;
     tally.consentUiRemoved += consent.removed;
@@ -507,6 +511,10 @@ function main() {
   console.log(`external frame hosts (must be in the CSP frame-src)  ${frameHosts.size}`);
   for (const h of [...frameHosts].sort()) console.log(`  https://${h}`);
   console.log(`scripts removed from fragments  ${tally.scriptsRemoved}`);
+  console.log(
+    `captured page footers demoted to <div>  ${tally.footersDemoted}` +
+      `  (nested, left as footers: ${tally.footersKeptNested})`,
+  );
   console.log(
     `dead consent banners removed  ${tally.consentUiRemoved}` +
       `  (${(tally.consentUiBytes / 1024 / 1024).toFixed(1)} MB)`,
