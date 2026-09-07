@@ -416,6 +416,20 @@ jobs:
             exit 1
           fi
           branch="$TARGET_BRANCH"
+          # Enumerate ONCE into a file rather than piping into `head`.
+          # `git add -A --dry-run | head -200` under `pipefail` is a live bug on
+          # any real clone: `head` closes the pipe at line 200, git dies of
+          # SIGPIPE, the pipeline returns 141 and `set -e` kills this step —
+          # after the clone, the integration and the Next.js build have all
+          # already run. Reproduced in this exact shape (strict mode, big
+          # producer, inside the redirected block): exit 141, block never
+          # completes. A WordPress clone is thousands of paths, so the 200-line
+          # cut is always reached. Reading the file with `sed` cannot SIGPIPE,
+          # and the count now comes from the same snapshot as the listing
+          # instead of a second full traversal that could disagree with it.
+          changes="$RUNNER_TEMP/702-dry-run-changes.txt"
+          git add -A --dry-run > "$changes"
+          total=$(wc -l < "$changes")
           {
             echo "## 702 dry run — no commit, no push, no PR"
             echo ""
@@ -424,10 +438,10 @@ jobs:
             echo "### Files that would be committed"
             echo ""
             echo '```'
-            git add -A --dry-run | head -200
+            sed -n '1,200p' "$changes"
             echo '```'
             echo ""
-            echo "Total changed paths: $(git add -A --dry-run | wc -l)"
+            echo "Total changed paths: $total"
           } >> "$GITHUB_STEP_SUMMARY"
           echo "::notice::dry_run=true — clone and build completed, nothing was written to the target repo."
 
