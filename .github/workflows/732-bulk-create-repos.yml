@@ -309,11 +309,18 @@ jobs:
             }
           }
           if ($failCount -gt 0) {
-            Write-Host "::warning::$failCount of $($domains.Count) repo(s) failed -- see the job summary. Successful ones above are not rolled back."
+            # Fail the STEP, not just a per-domain warning: 720's single-create throws on a
+            # non-zero exit, and a bulk batch must not report green while some domains in
+            # it failed (Copilot review, #1250). The loop above already ran every domain to
+            # completion before this point, and the successful ones are not rolled back --
+            # this only changes whether the run's own conclusion tells the truth about it.
+            throw "$failCount of $($domains.Count) repo(s) failed to create -- see the job summary for which. Successful ones above are not rolled back."
           }
 
       - name: Grant FFC-ORGWIDE-* tier teams (public repos only)
-        if: ${{ inputs.DryRun != true && inputs.Visibility == 'public' }}
+        # always() so a partial-failure throw above (which fails THIS job) still lets the
+        # teams get granted on whichever repos DID get created.
+        if: ${{ always() && inputs.DryRun != true && inputs.Visibility == 'public' }}
         shell: pwsh
         # Same env-not-interpolation rule as the create step above.
         env:
