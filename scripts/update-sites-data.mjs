@@ -193,6 +193,13 @@ function workTier({ devStatus, status, server, inCloudflare, notes, health, host
   if (hardDead) return '6 - Inactive / Archive';
   // Transferred away AND no longer in FFC Cloudflare = the domain left FFC.
   if (leftFfc({ status, inCloudflare, notes })) return '6 - Inactive / Archive';
+  // An operator can mark a domain resolved without a migration ever happening —
+  // e.g. an alias/stub that 301-redirects to an already-migrated FFC property
+  // (epic #702, 2026-07-26: thetrendylittlegeek.com/trendylittlegeek.com ->
+  // aprilhansen.com, legion-in-the-woods.org -> legioninthewoods.org). The
+  // domain's own hosting doesn't change, so `Server In Use` stays accurate;
+  // this marker is the only thing that should move it out of Tier 3.
+  if (/no migration needed/i.test(notes || '')) return '4 - Done / Stable';
   // Everything else (including a transfer that stayed in FFC Cloudflare) is
   // tiered normally by development activity and hosting.
   if (devStatus === 'Active') return '1 - Active Development';
