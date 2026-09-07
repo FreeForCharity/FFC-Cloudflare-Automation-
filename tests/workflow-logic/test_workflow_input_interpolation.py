@@ -346,6 +346,7 @@ BURNED_DOWN = (
     "101-domain-status.yml",
     "118-whmcs-domain-lock.yml",
     "102-domain-add-ffc-cloudflare-and-whmcs.yml",
+    "116-domain-transfer-epp-probe.yml",
 )
 
 
@@ -578,6 +579,30 @@ def test_the_frozen_counts_are_what_1080_reconciles_to():
                is defined over `inputs.X` and cannot see the laundering; filed
                as #1233 rather than absorbed here. Ledger L255.
       = 21 / 6
+      -116     burned down: `domain` moved to step-level `env:`, and the
+               job-summary line that re-interpolated the SAME input reads the
+               local `$domain` instead — two call sites off one entry, both in
+               DOUBLE quotes, on whmcs-prod. No quote breakout was needed:
+               `$( )` expands there. Measured on the shipped body with `domain`
+               = `example.org$($null = Set-Content -Path <sentinel> -Value
+               $env:WHMCS_API_SECRET)` — WHMCS secret stolen, callee still
+               handed a legal `Domain=[example.org]`, step exited 0. The
+               credential is the workflow's only one and arrives through
+               GITHUB_ENV from `whmcs-secrets-from-kv`, so both recommended
+               sweeps read the file as holding nothing.
+
+               It is the lane that BOUNDS L214 instead of re-confirming it.
+               Every earlier lane's fail-closed guard closed a silent shift the
+               remedy introduces; here nothing silent exists to close, because
+               every other element the body splats is a SWITCH and a switch
+               cannot absorb a value. Measured with the guard stripped: unset ->
+               `Missing an argument for parameter 'Domain'`, empty -> `Cannot
+               bind argument to parameter 'Domain' because it is an empty
+               string`, both rc 1. The guard stays for attribution, not for the
+               shift — and saying otherwise would have been a claim inherited
+               from 118 rather than measured here. Ledger L260. `mode` (choice)
+               and `show_code` (boolean) stay interpolated and are not findings.
+      = 20 / 5
 
     Pinned so that a silent collapse in either direction fails. If someone
     narrows the type rule back to string-only, this says which workflows just

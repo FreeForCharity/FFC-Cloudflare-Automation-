@@ -204,6 +204,25 @@ jobs:
           python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet pyyaml
           python3 scripts/check-workflow-input-interpolation.py
 
+      - name: Validate no dispatch input reaches a script body via an output
+        shell: bash
+        run: |
+          # The hop the check above cannot see, and the reason it cannot is the
+          # remedy itself. That guard is defined over `inputs.X`; moving the
+          # input into step-level `env:` is what fixes the first site AND what
+          # deletes the reference it reads. The value then goes on being
+          # republished to GITHUB_OUTPUT and substituted into script text one
+          # hop later, so a burn-down lane can fix every site the first guard
+          # names, delete its freeze entry, go green on every check here, and
+          # leave a working injection under a production credential (#1233).
+          # Measured on 102 with the remedy applied: the $( ) payload arrives at
+          # the first step as inert data, is written VERBATIM to GITHUB_OUTPUT,
+          # and EXECUTES at the downstream double-quoted site while the step
+          # exits 0. Four of the five workflows this freezes are absent from the
+          # first guard's list entirely.
+          python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet pyyaml
+          python3 scripts/check-workflow-laundered-input-interpolation.py
+
       - name: Validate an env-mapped dispatch input fails closed when empty
         shell: bash
         run: |
