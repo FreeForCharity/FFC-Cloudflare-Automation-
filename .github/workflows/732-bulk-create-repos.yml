@@ -114,8 +114,10 @@ jobs:
             d="${d#"${d%%[![:space:]]*}"}"
             d="${d%"${d##*[![:space:]]}"}"
             [ -z "$d" ] && continue
-            d="${d#https://}"; d="${d#http://}"; d="${d%/}"; d="${d#www.}"
+            # Lowercase FIRST so a case-sensitive scheme/www strip below always matches
+            # (e.g. "HTTPS://Example.org/" would otherwise survive with its scheme intact).
             d="$(printf '%s' "$d" | tr '[:upper:]' '[:lower:]')"
+            d="${d#https://}"; d="${d#http://}"; d="${d%/}"; d="${d#www.}"
             [ -z "$d" ] && continue
             if [ -z "${seen[$d]:-}" ]; then
               seen[$d]=1

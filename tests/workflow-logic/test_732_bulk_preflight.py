@@ -88,6 +88,21 @@ def test_normalization_dedup_and_case():
     assert clean == ["one.org", "two.org"], clean
 
 
+def test_uppercase_scheme_stripped_before_lowercase():
+    # Regression: scheme/www stripping is case-sensitive bash parameter expansion,
+    # so it must run AFTER lowercasing, not before, or an uppercase scheme like
+    # "HTTPS://" survives into the domain (Copilot review finding on PR #1250).
+    proc, _, out = run_preflight(
+        {
+            "IN_DOMAINS": "HTTPS://Example.org/",
+            "TEST_REPO_META": "404",
+        }
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    clean = json.loads(out["clean_domains"])
+    assert clean == ["example.org"], clean
+
+
 def test_empty_domains_input_fails():
     proc, _, _ = run_preflight({"IN_DOMAINS": "   ,, \n "})
     assert proc.returncode != 0, proc.stdout
