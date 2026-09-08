@@ -1916,6 +1916,26 @@
       "categoryCode": "GH"
     },
     {
+      "number": 732,
+      "title": "Repo - Bulk Create GitHub Repos",
+      "apis": [
+        "Repo"
+      ],
+      "file": "732-bulk-create-repos.yml",
+      "triggers": [
+        "workflow_dispatch"
+      ],
+      "environments": [
+        "github-prod"
+      ],
+      "description": "One gated run creates FFC-EX-<domain> for every domain in a list, instead of one github-prod approval per domain (720 stays the single-repo path). Built for the \"ensure every charity .org domain has a repo at minimum\" pass: default template is the lightweight FFC-IN-Footer_Only_Template, and EnablePages \u2014 when turned on \u2014 is hardcoded to the github-default URL. This workflow never sets a CNAME and never touches DNS; a live custom domain is a separate, later, per-repo decision.  Mirrors 720's preflight (same collision + sibling-domain scan, same reasoning) and reuses scripts/Create-GitHubRepo.ps1 unchanged, just called once per clean domain instead of once per dispatch.",
+      "safetyLevel": "Writes (gated)",
+      "approvalEnv": "\u2705 github-prod",
+      "guard": "dispatch-only; creates FFC-EX-\\<domain\\> for every domain in a list under ONE approval instead of one-per-domain (720 stays the single-repo path); ungated preflight refuses per-domain on name collision or sibling-domain match before the gate is spent; no CNAME input and never touches DNS; `dry_run` default true",
+      "category": "GitHub (Website + Repo)",
+      "categoryCode": "GH"
+    },
+    {
       "number": 733,
       "title": "Repo - Credential Rotation Reminders (quarterly)",
       "apis": [
