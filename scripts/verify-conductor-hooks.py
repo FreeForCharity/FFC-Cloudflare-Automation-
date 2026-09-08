@@ -403,7 +403,15 @@ def verify(workspace: pathlib.Path, source: str = SOURCE_EXPLICIT) -> dict:
             f"workspace was inferred from the current directory ({workspace}), and that "
             "directory ships the very `.claude/hooks/` this check would probe -- so it "
             "grades itself and says nothing about the session's real project root (#1237)"
-            + (f"; sibling checkouts suggest the session root is {hint}" if hint else "")
+            # Quoted for the same reason the printed remedy is: this path is read
+            # to be retyped, and an unquoted spaced path gives no clue where it
+            # ends. shlex.quote leaves an ordinary path bare, so this costs
+            # nothing in the common case.
+            + (
+                f"; sibling checkouts suggest the session root is {shlex.quote(hint)}"
+                if hint
+                else ""
+            )
         )
         return report
 
@@ -572,7 +580,8 @@ def main(argv: list[str] | None = None) -> int:
         # before this guard existed: `--workspace ""` from inside the hub clone
         # printed `HOOKS: wired ... exit 0`. Usage error, not a verdict: nobody
         # means "the empty path", so there is no honest reading to fall back to.
-        if not args.workspace.strip():
+        stated = args.workspace.strip()
+        if not stated:
             print(
                 "error: --workspace was empty; pass the session's project root "
                 "(an empty value resolves to the current directory, which is the "
@@ -580,7 +589,13 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
-        raw_workspace, source = args.workspace, SOURCE_EXPLICIT
+        # The STRIPPED value is what gets used, not just what gets tested. A
+        # leading space makes the path RELATIVE -- measured, `" /home/user "`
+        # resolves to `<cwd>/ /home/user `, which does not exist, so a correctly
+        # stated root reports NOT WIRED. It points the safe way but is not
+        # harmless: the remedy would then offer `--render` into that junk path,
+        # and render creates parents. Caught in review round 2 on #1253.
+        raw_workspace, source = stated, SOURCE_EXPLICIT
     elif os.environ.get("CLAUDE_PROJECT_DIR"):
         raw_workspace, source = os.environ["CLAUDE_PROJECT_DIR"], SOURCE_ENV
     else:

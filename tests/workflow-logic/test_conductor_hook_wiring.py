@@ -50,13 +50,20 @@ def run(
         # Written as an inline literal, not a prepared dict: the encoding scanner
         # (#962) reads this call statically and cannot follow a variable, so
         # `env=env` fails `check-subprocess-encoding.py` even when the pin is
-        # correct. Empty string is how "unset" is spelled here -- the verifier
-        # tests `CLAUDE_PROJECT_DIR` for truthiness, so "" and absent take the
-        # same branch, and that keeps the whole env in one readable expression.
+        # correct.
+        #
+        # `CLAUDE_PROJECT_DIR` is genuinely ABSENT when a test does not set it,
+        # rather than present-but-empty. An earlier version passed `"" `and leaned
+        # on the verifier testing it for truthiness -- which works today and
+        # couples these tests to an implementation detail of the thing they test:
+        # if the verifier ever switched to `"CLAUDE_PROJECT_DIR" in os.environ`,
+        # every provenance test would silently start exercising the `env` branch
+        # while still passing. The comprehension also strips an inherited value,
+        # so a suite run from a rooted session cannot leak one in.
         env={
-            **os.environ,
+            **{k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"},
             "PYTHONIOENCODING": "utf-8",
-            "CLAUDE_PROJECT_DIR": project_dir or "",
+            **({"CLAUDE_PROJECT_DIR": project_dir} if project_dir is not None else {}),
         },
         cwd=cwd,
         timeout=120,
@@ -661,6 +668,39 @@ def test_an_empty_workspace_is_a_usage_error_not_an_explicit_statement():
             assert proc.returncode == 2, (value, proc.stdout, proc.stderr)
             assert "HOOKS: wired" not in proc.stdout, (value, proc.stdout)
             assert "--workspace was empty" in proc.stderr, (value, proc.stderr)
+
+
+def test_a_padded_workspace_is_stripped_before_it_is_resolved():
+    """A LEADING space makes the path relative, so the stated root is not measured.
+
+    Measured: `Path(" /home/user ").resolve()` is `<cwd>/ /home/user `, which does
+    not exist -- so a correctly stated session root reports NOT WIRED. It errs the
+    safe way and is still not harmless, because the remedy then offers `--render`
+    into that junk path and render creates its parents.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        _, hub = worker_layout(td)
+        padded = run("--workspace", f"  {hub}  ")
+        assert padded.returncode == 0, padded.stdout + padded.stderr
+        assert "HOOKS: wired" in padded.stdout, padded.stdout
+        # The verdict must be the same one the unpadded path gets, not merely
+        # non-zero: a bare exit assertion here would pass on a NOT WIRED too.
+        assert padded.stdout == run("--workspace", str(hub)).stdout
+
+
+def test_the_env_branch_is_reached_by_a_real_variable_not_an_empty_one():
+    """The helper must leave `CLAUDE_PROJECT_DIR` absent, not present-and-empty.
+
+    Otherwise every provenance test depends on the verifier reading that variable
+    for truthiness, and would keep passing -- while measuring something else --
+    if it ever switched to an `in os.environ` check.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        _, hub = worker_layout(td)
+        unset = json.loads(run("--json", cwd=str(hub)).stdout)
+        assert unset["workspace_source"] == "inferred", unset
+        given = json.loads(run("--json", cwd=str(hub), project_dir=str(hub)).stdout)
+        assert given["workspace_source"] == "env", given
 
 
 def test_an_unknown_workspace_source_raises_rather_than_certifying():
