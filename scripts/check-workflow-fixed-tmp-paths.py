@@ -218,10 +218,27 @@ def scan_all() -> tuple[list[Finding], list[str], int]:
     return findings, errors, len(paths)
 
 
+def freeze_key(source: str) -> str:
+    """The key a finding is frozen under.
+
+    A **workflow** is keyed by basename, matching the freeze convention every
+    sibling guard in `scripts/` already uses.
+
+    A **composite action** cannot be, and this is the whole reason the function
+    exists: all six of them are named `action.yml`, so a basename key names all
+    six at once. One entry would silently excuse the other five, and an error
+    line reading `action.yml: /tmp/x` would not say which action it meant.
+    They are keyed by repo-relative path instead, which is unambiguous and is
+    also what the finding already prints. Raised by Copilot on #1256.
+    """
+    normalized = source.replace("\\", "/")
+    return normalized if normalized.endswith("/action.yml") else pathlib.Path(normalized).name
+
+
 def current_map(findings: list[Finding]) -> dict[str, list[str]]:
     current: dict[str, list[str]] = {}
     for finding in findings:
-        current.setdefault(pathlib.Path(finding.source).name, []).append(finding.text)
+        current.setdefault(freeze_key(finding.source), []).append(finding.text)
     return current
 
 
@@ -240,8 +257,11 @@ def compare(
             errors.append(f"{name}: {', '.join(new)}")
 
     for name, texts in sorted(known.items()):
-        matches = list(WORKFLOWS.glob(name)) + list(ACTIONS.glob(f"*/{name}"))
-        if not matches:
+        # A slash means the key is a repo-relative composite-action path; a bare
+        # name is a workflow basename. Both are resolved against the tree, so a
+        # freeze entry naming a file that no longer exists is still an error.
+        target = (REPO_ROOT / name) if "/" in name else (WORKFLOWS / name)
+        if not target.is_file():
             errors.append(
                 f"{name}: listed in KNOWN_FIXED_TMP_PATHS but no such file exists. "
                 f"The freeze has stopped describing the tree."

@@ -24,7 +24,7 @@ import tempfile
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "scripts"))
 
-from wf_extract import child_env, runner_temp, step_run  # noqa: E402
+from wf_extract import child_env, forward_slashes, runner_temp, step_run  # noqa: E402
 
 import importlib.util  # noqa: E402
 
@@ -166,6 +166,42 @@ def test_the_freeze_is_empty():
     assert guard.KNOWN_FIXED_TMP_PATHS == {}, guard.KNOWN_FIXED_TMP_PATHS
 
 
+def test_a_composite_action_is_frozen_by_path_not_by_action_yml():
+    """All six composite actions are named `action.yml`, so a basename key
+    would name every one of them at once — one entry silently excusing the
+    other five, and an error line that cannot say which action it meant.
+    Raised by Copilot on #1256."""
+    key = guard.freeze_key(".github/actions/whmcs-secrets-from-kv/action.yml")
+    assert key == ".github/actions/whmcs-secrets-from-kv/action.yml", key
+    other = guard.freeze_key(".github/actions/cloudflare-tokens-from-kv/action.yml")
+    assert key != other, "two different composite actions collapsed to one freeze key"
+
+
+def test_a_workflow_is_still_frozen_by_basename():
+    """The sibling guards' convention, unchanged."""
+    assert guard.freeze_key(".github/workflows/738-fleet-smoke-engine-drift-audit.yml") == (
+        "738-fleet-smoke-engine-drift-audit.yml"
+    )
+
+
+def test_a_windows_style_source_is_normalized_before_keying():
+    """`Path.relative_to` yields backslashes on Windows; the key must not
+    depend on which host ran the scan."""
+    assert guard.freeze_key(r".github\actions\whmcs-secrets-from-kv\action.yml") == (
+        ".github/actions/whmcs-secrets-from-kv/action.yml"
+    )
+
+
+def test_a_composite_action_freeze_entry_resolves_against_the_tree():
+    """A path key still has its existence checked — the freeze must fail when
+    it stops describing the tree, whichever population the entry names."""
+    real = ".github/actions/whmcs-secrets-from-kv/action.yml"
+    assert (REPO_ROOT / real).is_file(), "fixture path is stale, not the guard"
+    assert guard.compare({real: ["/tmp/x"]}, {real: ("/tmp/x",)}) == []
+    errors = guard.compare({}, {".github/actions/nope/action.yml": ("/tmp/x",)})
+    assert errors and "no such file" in errors[0], errors
+
+
 def test_a_freeze_entry_naming_a_missing_file_is_an_error():
     errors = guard.compare({}, {"999-not-a-workflow.yml": ("/tmp/x",)})
     assert errors and "no such file" in errors[0], errors
@@ -288,6 +324,24 @@ def test_child_env_hands_the_child_a_runner_temp():
     env = child_env()
     assert env.get("RUNNER_TEMP") == runner_temp(), env.get("RUNNER_TEMP")
     assert pathlib.Path(env["RUNNER_TEMP"]).is_dir(), env["RUNNER_TEMP"]
+
+
+def test_runner_temp_is_spelled_with_forward_slashes():
+    """The value is handed to `bash` step bodies as `"$tmpd/file"`. On Windows
+    `mkdtemp` returns `C:\\Users\\...`, MSYS bash eats the backslashes as
+    escapes, and the redirect writes to a mangled path nobody reads — the
+    failure CLAUDE.md records for any Windows path handed to git-bash. No-op on
+    POSIX. Raised by Copilot on #1256."""
+    # The rule, on a synthetic Windows path — this is the half that
+    # discriminates from a Linux host, where `mkdtemp` never emits a backslash
+    # and an inspection of the live value would pass with no normalization.
+    assert forward_slashes(r"C:\Users\x\Temp\wf-logic-runner-temp-1") == (
+        "C:/Users/x/Temp/wf-logic-runner-temp-1"
+    )
+    # ...and the live value, which must also still be a real directory.
+    value = runner_temp()
+    assert "\\" not in value, value
+    assert pathlib.Path(value).is_dir(), f"normalized path is not openable: {value}"
 
 
 def test_child_env_runner_temp_can_still_be_overridden():

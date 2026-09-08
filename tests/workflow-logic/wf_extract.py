@@ -70,6 +70,17 @@ WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 _RUNNER_TEMP: str | None = None
 
 
+def forward_slashes(path: str) -> str:
+    """`C:\\Users\\x\\Temp\\y` -> `C:/Users/x/Temp/y`; unchanged on POSIX.
+
+    Split out so the rule is testable from any host. On Linux `mkdtemp` never
+    returns a backslash, so a test that only inspects the live value asserts
+    nothing here and would go green against no normalization at all -- which is
+    exactly how a Windows-only defect stays invisible to a Linux CI (#943).
+    """
+    return path.replace("\\", "/")
+
+
 def runner_temp() -> str:
     """This process's RUNNER_TEMP, created on first use and removed at exit.
 
@@ -79,8 +90,20 @@ def runner_temp() -> str:
     """
     global _RUNNER_TEMP
     if _RUNNER_TEMP is None:
-        _RUNNER_TEMP = tempfile.mkdtemp(prefix="wf-logic-runner-temp-")
-        atexit.register(shutil.rmtree, _RUNNER_TEMP, ignore_errors=True)
+        created = tempfile.mkdtemp(prefix="wf-logic-runner-temp-")
+        # Remove the real directory by its NATIVE path; hand out the
+        # forward-slash spelling. On Windows `mkdtemp` returns
+        # `C:\Users\...\Temp\wf-logic-runner-temp-x`, and this value is
+        # exported as RUNNER_TEMP into `bash` step bodies that use it as
+        # `"$tmpd/smoke-body"`. MSYS bash eats a backslash as an escape, so
+        # `C:\Users\...` arrives as `C:Users...` and the redirect writes
+        # somewhere nobody looks -- the same mangling CLAUDE.md records for a
+        # Windows-style path handed to git-bash. `C:/Users/...` is the spelling
+        # both native Python and MSYS bash read the same way, and it is what
+        # this repo already prescribes for any path crossing that boundary.
+        # No-op on POSIX, where `mkdtemp` never returns a backslash.
+        atexit.register(shutil.rmtree, created, ignore_errors=True)
+        _RUNNER_TEMP = forward_slashes(created)
     return _RUNNER_TEMP
 
 
