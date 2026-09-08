@@ -618,44 +618,6 @@ if (process.argv.includes('--self-test')) {
       })(),
       false,
     ],
-
-    // --- isRouterPrefetchAbort -----------------------------------------
-    // ctvip.org, measured directly: the App Router prefetches every footer
-    // link's route in the background, then aborts that fetch the moment the
-    // link scrolls back out of view -- reported as net::ERR_ABORTED on the
-    // bare origin root, on nearly every page, with no missing resource
-    // involved at all.
-    [
-      'an aborted RSC prefetch (Next-Router-Prefetch) is excused',
-      isRouterPrefetchAbort('net::ERR_ABORTED', { 'next-router-prefetch': '1' }),
-      true,
-    ],
-    [
-      'an aborted RSC prefetch (RSC header) is excused',
-      isRouterPrefetchAbort('net::ERR_ABORTED', { rsc: '1' }),
-      true,
-    ],
-    [
-      'an aborted fetch carrying Purpose: prefetch is excused',
-      isRouterPrefetchAbort('net::ERR_ABORTED', { purpose: 'prefetch' }),
-      true,
-    ],
-    [
-      'header matching is case-insensitive on the VALUE, not just the name',
-      isRouterPrefetchAbort('net::ERR_ABORTED', { 'sec-purpose': 'Prefetch;Anticipated' }),
-      true,
-    ],
-    [
-      'an ordinary abort with no prefetch headers is NOT excused',
-      isRouterPrefetchAbort('net::ERR_ABORTED', { accept: 'text/html' }),
-      false,
-    ],
-    [
-      'a real failure (not ERR_ABORTED) is never excused, even with the header',
-      isRouterPrefetchAbort('net::ERR_CONNECTION_REFUSED', { 'next-router-prefetch': '1' }),
-      false,
-    ],
-    ['no headers at all is not excused', isRouterPrefetchAbort('net::ERR_ABORTED', null), false],
   ];
   let failed = 0;
   for (const [name, got, want] of cases) {
@@ -715,37 +677,6 @@ function isLegacy(url) {
   }
   const d = domain.toLowerCase();
   return hostname === d || hostname.endsWith(`.${d}`);
-}
-
-/**
- * Is an aborted request the App Router cancelling its OWN background
- * prefetch, rather than something the page actually needed?
- *
- * Scrolling the footer into view (below) puts every next/link in it in the
- * viewport, and the App Router starts fetching each route's RSC payload in
- * the background as soon as a link is observed -- almost always including
- * "/", since a footer that links home is the common case. Scrolling back up
- * takes the link back out of view, and the router aborts that fetch
- * (net::ERR_ABORTED) via the same IntersectionObserver that started it --
- * well before the page settles, so no wait placed later in the flow (a
- * networkidle wait, a delay before closing the context) can catch it,
- * because the abort has already happened and already been recorded by the
- * time any such wait would run. Measured directly: on ctvip.org this fires
- * on essentially every page and always names the bare origin root.
- *
- * It is never a missing resource: the page issued no real navigation to it,
- * nothing on the page links to a broken fetch, and the exact same route
- * still gets exercised (successfully) by its own entry in `pages`. Detected
- * by the headers Next attaches to every prefetch it issues, not by the URL
- * shape, so it holds regardless of which route happens to be prefetched.
- */
-function isRouterPrefetchAbort(failure, headers) {
-  if (failure !== 'net::ERR_ABORTED') return false;
-  if (!headers) return false;
-  if (headers['next-router-prefetch'] != null) return true;
-  if (headers['rsc'] != null) return true;
-  const purpose = (headers['purpose'] || headers['sec-purpose'] || '').toLowerCase();
-  return purpose.includes('prefetch');
 }
 
 const MIME = {
@@ -888,12 +819,6 @@ async function main() {
       const url = r.url();
       if (isLegacy(url)) return;
       const failure = r.failure()?.errorText;
-      // Same-origin only: the App Router never prefetches a THIRD-PARTY route,
-      // so a cross-origin request carrying a generic Purpose/Sec-Purpose:
-      // prefetch header (browser speculative prefetch, an embed's own <link
-      // rel=prefetch>) is a real third-party outcome and must still be
-      // reported, not excused by a rule written for our own router.
-      if (url.startsWith(origin) && isRouterPrefetchAbort(failure, r.headers())) return;
       const entry = `${url} (${failure})`;
       // Same-origin failures mean the mirror is incomplete. Third-party hosts
       // may simply be unreachable from CI, so those are reported, not fatal.
@@ -916,10 +841,29 @@ async function main() {
       // widget that never scrolls into view never reveals a missing handler.
       await tab.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
       await tab.waitForTimeout(2500);
-      await tab.evaluate(() => window.scrollTo(0, 0));
-      await tab.waitForTimeout(800);
 
+      // Deliberately NOT scrolling back to the top here. Bringing the footer's
+      // next/links into view above starts the App Router prefetching those
+      // routes' RSC payload in the background; scrolling back away takes them
+      // back OUT of view, and the router aborts that fetch (net::ERR_ABORTED)
+      // via the same IntersectionObserver that started it -- reported on the
+      // requestfailed listener above as a same-origin MISSING LOCAL asset that
+      // was never actually missing. Measured directly: on ctvip.org this fired
+      // on 40 of 41 pages, always naming the bare origin root. It is not a
+      // teardown-timing race (a networkidle wait before ctx.close() below does
+      // not help -- the abort has already happened by then) and Playwright's
+      // synchronous request.headers() does not expose the Sec-Purpose header
+      // that would otherwise identify it, so detecting it after the fact isn't
+      // reliable either. Simplest fix: never trigger the cancel. The footer
+      // links stay in view for the rest of this page's lifetime, so whatever
+      // they prefetch just finishes normally against loopback with no real
+      // network latency, and ctx.close() below has nothing left in flight.
       if (shots) {
+        // A screenshot alone needs the top-of-page framing, and paying the
+        // same false-positive risk to get it is fine here: --shots is a
+        // manual debugging aid, never part of the default CI gate.
+        await tab.evaluate(() => window.scrollTo(0, 0));
+        await tab.waitForTimeout(800);
         const name = path === '/' ? 'home' : path.replace(/^\/|\/$/g, '').replace(/\//g, '_');
         await tab.screenshot({ path: join(shots, `${name}.png`) });
       }
@@ -936,7 +880,19 @@ async function main() {
     // image, which is most real charity sites. A reference the source SERVES
     // is a genuine defect and stays fatal.
 
-    results.push({ path, problems, legacyHits, localMissing, thirdPartyFailed });
+    // Copy the arrays rather than pushing the live references: they are the
+    // SAME objects the requestfailed/response listeners above keep mutating
+    // for the rest of this tab's life (ctx.close() below, or -- when --shots
+    // is set -- the screenshot's own scroll-to-top), so pushing the
+    // references would let a later event silently rewrite a page's verdict
+    // after it was already decided.
+    results.push({
+      path,
+      problems: [...problems],
+      legacyHits: [...legacyHits],
+      localMissing: [...localMissing],
+      thirdPartyFailed: [...thirdPartyFailed],
+    });
     await ctx.close();
   }
 
