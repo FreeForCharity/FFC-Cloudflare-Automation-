@@ -80,7 +80,13 @@ ACTIONS = REPO_ROOT / ".github" / "actions"
 
 # `/tmp/` plus at least one path character. `${RUNNER_TEMP:-/tmp}` and
 # `process.env.RUNNER_TEMP || "/tmp"` end at the `/tmp`, so neither matches.
-FIXED_TMP_RE = re.compile(r"/tmp/[^\s\"');:,]*")
+#
+# The backtick is in the terminator set because a JS template literal is one of
+# the two spellings this guard has to read: without it, `` `/tmp/probes/x.head` ``
+# captures its own closing backtick into the finding text, so the reported
+# snippet is not the path and a freeze entry would have to carry the
+# punctuation to match. Raised by Copilot on #1256.
+FIXED_TMP_RE = re.compile(r"/tmp/[^\s\"'`);:,]*")
 
 # Leading tokens that make a line prose rather than code, in the two languages a
 # workflow body is written in.

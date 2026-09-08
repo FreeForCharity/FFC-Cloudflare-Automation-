@@ -16,6 +16,7 @@ will believe the next time it is inconvenient.
 
 from __future__ import annotations
 
+import ast
 import pathlib
 import subprocess
 import sys
@@ -29,6 +30,7 @@ from wf_extract import child_env, forward_slashes, runner_temp, step_run  # noqa
 import importlib.util  # noqa: E402
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+TESTS_DIR = pathlib.Path(__file__).resolve().parent
 GUARD = REPO_ROOT / "scripts" / "check-workflow-fixed-tmp-paths.py"
 
 _spec = importlib.util.spec_from_file_location("check_workflow_fixed_tmp_paths", GUARD)
@@ -74,8 +76,11 @@ def test_the_scanner_flags_a_fixed_path_in_a_github_script_body():
         "              const headPath = `/tmp/probes/${safe}.head`;\n"
     )
     hits = [text for _, text in _scan(body)]
-    assert "/tmp/targets.json" in hits, hits
-    assert any(h.startswith("/tmp/probes/") for h in hits), hits
+    # Pinned EXACTLY, not with `startswith`. The loose form was what let the
+    # template literal's own closing backtick ride along in the captured text:
+    # a finding that reads ``/tmp/probes/${safe}.head` `` is not the path, and a
+    # freeze entry would have had to carry the punctuation to match it.
+    assert hits == ["/tmp/targets.json", "/tmp/probes/${safe}.head"], hits
 
 
 def test_a_read_is_a_finding_not_only_a_write():
@@ -307,12 +312,23 @@ def test_two_concurrent_copies_of_a_body_writing_a_fixed_path_collide():
 
 
 def test_the_same_body_under_runner_temp_survives_concurrency():
-    """The fix, on the same fixture: distinct RUNNER_TEMP, no interference."""
+    """The fix, on the same fixture: distinct RUNNER_TEMP, no interference.
+
+    The overrides go through `forward_slashes` for the same reason
+    `runner_temp()` does: `TemporaryDirectory()` yields a platform-native path,
+    and a `C:\\...` value handed to the bash body below has its backslashes
+    eaten as escapes by MSYS. A test that hands bash a path bash cannot read
+    measures the fixture, not the fix. Raised by Copilot on #1256 — the first
+    round normalized the harness and left its own override un-normalized.
+    """
     script = _COLLIDING.format(path='"${RUNNER_TEMP:-/tmp}/collide-fixture.txt"')
     with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
         codes = _concurrent_rc(
             script,
-            [child_env(RUNNER_TEMP=a, MARKER="A"), child_env(RUNNER_TEMP=b, MARKER="B")],
+            [
+                child_env(RUNNER_TEMP=forward_slashes(a), MARKER="A"),
+                child_env(RUNNER_TEMP=forward_slashes(b), MARKER="B"),
+            ],
         )
     assert codes == [0, 0], f"isolated writers still interfered: {codes}"
 
@@ -342,6 +358,75 @@ def test_runner_temp_is_spelled_with_forward_slashes():
     value = runner_temp()
     assert "\\" not in value, value
     assert pathlib.Path(value).is_dir(), f"normalized path is not openable: {value}"
+
+
+def _runs_a_bash_body(tree: ast.Module) -> bool:
+    """True if the module launches `bash` — i.e. its RUNNER_TEMP reaches a shell
+    that treats a backslash as an escape.
+
+    Deliberately a literal-argv check and nothing cleverer: a module that builds
+    its interpreter name dynamically is not something a source scan can resolve,
+    and guessing would put the rule back on the correct-code side of the line.
+    Such a module is simply not covered, which this docstring states rather than
+    letting the reader infer coverage the scan does not have.
+    """
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if getattr(node.func, "attr", "") not in {"run", "Popen"}:
+            continue
+        for arg in node.args[:1]:
+            if isinstance(arg, ast.List) and arg.elts:
+                first = arg.elts[0]
+                if isinstance(first, ast.Constant) and first.value == "bash":
+                    return True
+    return False
+
+
+def test_no_module_hands_child_env_an_unnormalized_runner_temp():
+    """Every `child_env(RUNNER_TEMP=...)` override must be normalized.
+
+    Checked statically, against the source, because the defect is invisible
+    from the platform CI runs on: `TemporaryDirectory()` yields forward slashes
+    on Linux, so a module handing bash a raw `C:\\...` path passes here and
+    fails only on the Windows git-bash host. That asymmetry is #943's whole
+    lesson, and `test_child_env_inheritance` already enforces its sibling rule
+    the same way.
+
+    The first round of this PR normalized `runner_temp()` and left this very
+    module's own override raw — which is why the rule is enforced over the
+    directory rather than pinned to the one call site that was wrong.
+
+    SCOPED TO MODULES THAT RUN A `bash` BODY, and that qualifier is the rule,
+    not a convenience. `test_101_domain_status_wiring` hands `RUNNER_TEMP` to a
+    **PowerShell** step, where a native `C:\\...` path is exactly right and
+    forward slashes would be the odd spelling. A blanket rule flags it, and a
+    guard that reports correct code as a violation is one somebody switches off
+    (#1019). The consumer decides, so the scan asks who the consumer is.
+    """
+    allowed = {"forward_slashes", "runner_temp"}
+    offenders = []
+    for path in sorted(TESTS_DIR.glob("test_*.py")):
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        if not _runs_a_bash_body(tree):
+            continue
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and getattr(node.func, "id", "") == "child_env"):
+                continue
+            for kw in node.keywords:
+                if kw.arg != "RUNNER_TEMP":
+                    continue
+                value = kw.value
+                if isinstance(value, ast.Constant):
+                    continue  # a literal is written by hand and visible in review
+                if isinstance(value, ast.Call) and getattr(value.func, "id", "") in allowed:
+                    continue
+                offenders.append(f"{path.name}:{value.lineno} {ast.unparse(value)}")
+    assert not offenders, (
+        "these child_env(RUNNER_TEMP=...) overrides are handed to bash step bodies "
+        f"un-normalized, so MSYS eats the backslashes on Windows: {offenders}"
+    )
 
 
 def test_child_env_runner_temp_can_still_be_overridden():
