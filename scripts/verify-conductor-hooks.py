@@ -1,14 +1,26 @@
 #!/usr/bin/env python3
-"""Verify that the Conductor's session actually loads this repo's hooks (#1042).
+"""Verify that a privileged session actually loads this repo's hooks (#1042, #1237).
 
 THE DEFECT THIS EXISTS FOR
-    Claude Code loads hooks from the **session's project root**. Every sandboxed
-    agent clones this repo and opens it as its project root, so `.claude/settings.json`
-    applies and `.claude/hooks/` runs. The Conductor does not: its project root is
-    its own workspace, and it merely `cd`s into a clone to work. The hub's settings
-    spell every hook path as `$CLAUDE_PROJECT_DIR/.claude/hooks/...`, and
-    `$CLAUDE_PROJECT_DIR` for that session is the *workspace* -- so the block never
-    resolves and the single most privileged actor in the system runs unguarded.
+    Claude Code loads hooks from the **session's project root**. A sandboxed agent
+    that clones this repo and opens *it* as its project root gets `.claude/settings.json`
+    applied and `.claude/hooks/` run. Two populations do not, and they are the ones
+    with authority:
+
+      - the **Conductor**, whose project root is its own workspace and which merely
+        `cd`s into a clone to work (#1042, ledger L218); and
+      - a **multi-repo cloud worker**, which clones five FFC repos side by side and
+        runs with its project root set to their *parent* (#1237). No repo's
+        `.claude/` is the session config, so the hub's hooks are present, correct
+        and inert -- for the very agents L218 called the protected class.
+
+    The hub's settings spell every hook path as `$CLAUDE_PROJECT_DIR/.claude/hooks/...`,
+    and `$CLAUDE_PROJECT_DIR` for either session is *not* the clone -- so the block
+    never resolves and the session runs unguarded.
+
+    The population is therefore **any session whose project root is not the repo**,
+    not the Conductor alone. That correction is the whole of #1237: a finding closed
+    with "a hook now holds this" is still open for whoever does the issue->PR work.
 
     Measured, not inferred (ledger L218, run 134): the Conductor piped a board audit
     into `tail` and read `$?` after the pipe, reported `rc=0` from `tail` while the
@@ -33,6 +45,20 @@ WHAT IT CHECKS, AND WHY THE LAST ONE IS THE POINT
     4. **A live two-sided probe of the guard the config points at.** The configured
        `PreToolUse`/`Bash` script is fed one command that MUST be blocked and one that
        MUST be allowed, and both verdicts must land.
+    5. **That the workspace was stated rather than guessed** (#1237). Checks 1-4 are
+       all relative to a directory, so they answer "is THIS tree wired" and never
+       "is the running session wired". When the directory is merely the cwd, and the
+       cwd happens to be a clone that ships `.claude/hooks/`, every check above passes
+       *by construction* -- the verifier grades the config against itself.
+
+    (5) is not pedantry about arguments; it is the #1237 false green, measured. Run
+    from inside the hub clone with no arguments, this script used to print
+    `HOOKS: wired ... exit 0` inside a five-repo cloud-worker session whose project
+    root was `/home/user`, which has no `.claude` at all and loads nothing. The
+    guard it probed was real and the probe was honest -- it was simply the guard of
+    a session that was not running. A verifier written to make L218's false green
+    impossible had its own, reached through its default argument. So an inferred
+    workspace that ships the hooks under test is reported UNVERIFIED, never wired.
 
     (4) is not belt-and-braces. Config presence is not proof a hook works -- that is
     this repo's most-repeated lesson, and a verifier that stopped at (3) would be a
@@ -57,17 +83,25 @@ USAGE
     # render the tracked template into the workspace, then verify
     python3 scripts/verify-conductor-hooks.py --render --workspace /path/to/workspace
 
+    # a multi-repo cloud worker: the session root is the PARENT of the clones
+    python3 FFC-Cloudflare-Automation/scripts/verify-conductor-hooks.py \
+        --render --workspace /home/user --hub-clone /home/user/FFC-Cloudflare-Automation
+
     `--workspace` defaults to $CLAUDE_PROJECT_DIR, then to the current directory.
+    Only the first two count as *stated*; the cwd fallback is a guess, and a guess
+    that lands on a hook-shipping clone is refused rather than certified (see 5).
     `--hub-clone` defaults to this script's own repository root.
 
 EXIT CODES
     0  wired -- settings resolve and the guard demonstrably blocks and allows
-    1  not wired, or the probe did not land both verdicts
+    1  not wired, the probe did not land both verdicts, or the workspace was
+       inferred and could only certify itself (#1237)
     2  usage error (missing template, unreadable workspace)
 
-    Non-zero is deliberately the same for "no config" and "config present but the
-    guard does not work". Both mean the same thing to the run about to start: you
-    are unguarded. Distinguishing them is the report's job, not the exit code's.
+    Non-zero is deliberately the same for "no config", "config present but the
+    guard does not work" and "cannot tell". All three mean the same thing to the
+    run about to start: you are not known to be guarded. Distinguishing them is
+    the report's job, not the exit code's.
 """
 
 from __future__ import annotations
@@ -137,6 +171,57 @@ def from_msys_path(raw: str, *, windows: bool | None = None) -> str:
 
 _QUOTED_PY = re.compile(r"""["']([^"']+?\.py)["']""")
 _BARE_PY = re.compile(r"""(?:[A-Za-z]:)?[^\s"';|&]+\.py""")
+
+
+def ships_hooks(directory: pathlib.Path) -> bool:
+    """True when `directory` carries the hook scripts a settings block would name.
+
+    This is the self-certification test (#1237). A workspace that ships its own
+    `.claude/hooks/` satisfies every path-resolution check no matter what the
+    session's real project root is, so inferring such a directory and then
+    reporting it wired proves only that the directory exists.
+    """
+    try:
+        return (directory / ".claude" / "hooks").is_dir()
+    except OSError:
+        return False
+
+
+def sibling_clones(workspace: pathlib.Path) -> list[str]:
+    """Names of the git checkouts sitting beside `workspace`, sorted.
+
+    Used only to make the #1237 refusal actionable: when a clone has siblings, the
+    parent is almost certainly the session's project root, and naming it saves the
+    reader working out what to pass to `--workspace`. Errors are swallowed to an
+    empty list on purpose -- a hint that cannot be computed must not turn a
+    verification into a crash.
+    """
+    try:
+        parent = workspace.parent
+        return sorted(
+            d.name for d in parent.iterdir() if d.is_dir() and (d / ".git").exists()
+        )
+    except OSError:
+        return []
+
+
+def candidate_session_root(workspace: pathlib.Path) -> str | None:
+    """The directory a multi-repo worker's project root probably is, or None.
+
+    Deliberately conservative: it fires only on the shape #1237 measured -- two or
+    more sibling checkouts under a parent that carries no `.claude` of its own. A
+    parent that already has `.claude` is not a missing-config story, and pointing
+    at it would be advice to overwrite something.
+    """
+    if len(sibling_clones(workspace)) < 2:
+        return None
+    parent = workspace.parent
+    try:
+        if (parent / ".claude").is_dir():
+            return None
+    except OSError:
+        return None
+    return str(parent)
 
 
 def _expand(raw: str, workspace: pathlib.Path) -> str:
@@ -258,9 +343,19 @@ def probe_guard(guard: pathlib.Path) -> list[dict]:
     return results
 
 
-def verify(workspace: pathlib.Path) -> dict:
+def verify(workspace: pathlib.Path, source: str = "explicit") -> dict:
+    """Report on `workspace`. `source` says how that path was chosen (#1237).
+
+    `source` is a parameter and not a read of `sys.argv` because it changes the
+    VERDICT, not just the wording: an inferred workspace that ships the hooks
+    under test cannot be certified. Passing it in keeps both branches reachable
+    from a test without reconstructing a command line.
+    """
     report: dict = {
         "workspace": str(workspace),
+        "workspace_source": source,
+        "self_certifying": False,
+        "candidate_session_root": candidate_session_root(workspace),
         "settings_files": [],
         "hooks_carriers": [],
         "missing_paths": [],
@@ -268,6 +363,21 @@ def verify(workspace: pathlib.Path) -> dict:
         "problems": [],
         "wired": False,
     }
+
+    # Checked BEFORE reading any settings: the whole point is that the checks
+    # below would all pass. Running them first and then withholding the verdict
+    # would print a report indistinguishable from a real pass to anyone skimming.
+    if source == "inferred" and ships_hooks(workspace):
+        report["self_certifying"] = True
+        hint = report["candidate_session_root"]
+        report["problems"].append(
+            f"workspace was inferred from the current directory ({workspace}), and that "
+            "directory ships the very `.claude/hooks/` this check would probe -- so it "
+            "grades itself and says nothing about the session's real project root (#1237)"
+            + (f"; sibling checkouts suggest the session root is {hint}" if hint else "")
+        )
+        return report
+
     report["settings_files"] = [
         n for n in SETTINGS_NAMES if (workspace / ".claude" / n).is_file()
     ]
@@ -354,6 +464,16 @@ def start_line(report: dict) -> str:
             f"HOOKS: wired -- {report.get('guard_bash')} blocks the L50 shape and "
             f"allows `{PROBE_ALLOW}` (verify-conductor-hooks.py, exit 0)"
         )
+    # A third wording, not a third exit code. "I could not tell" and "it is not
+    # wired" are the same instruction to the run about to start, but collapsing
+    # them in the RECORD is what #1237 is about: the reader needs to know whether
+    # a directory was measured or a question was dodged.
+    if report.get("self_certifying"):
+        return (
+            "HOOKS: UNVERIFIED -- workspace was inferred, not stated, and it ships the "
+            "hooks under test, so the check could only certify itself (#1237). Treat this "
+            "run as unguarded until re-run with an explicit --workspace. "
+        ) + "; ".join(report["problems"])
     return "HOOKS: NOT WIRED -- this run is unguarded (#1042). " + "; ".join(report["problems"])
 
 
@@ -398,8 +518,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--workspace",
-        default=os.environ.get("CLAUDE_PROJECT_DIR") or ".",
-        help="the Conductor's session project root (default: $CLAUDE_PROJECT_DIR, then cwd)",
+        default=None,
+        help="the session's project root (default: $CLAUDE_PROJECT_DIR, then cwd)",
     )
     parser.add_argument(
         "--hub-clone",
@@ -411,15 +531,30 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", dest="as_json", help="machine-readable report")
     args = parser.parse_args(argv)
 
-    workspace = pathlib.Path(from_msys_path(args.workspace)).expanduser().resolve()
+    # Three provenances, and only the third is a guess. `$CLAUDE_PROJECT_DIR` is
+    # set BY the session, so it is a statement of the real project root and ranks
+    # with an explicit flag; the cwd is wherever the operator happened to `cd`.
+    if args.workspace is not None:
+        raw_workspace, source = args.workspace, "explicit"
+    elif os.environ.get("CLAUDE_PROJECT_DIR"):
+        raw_workspace, source = os.environ["CLAUDE_PROJECT_DIR"], "env"
+    else:
+        raw_workspace, source = ".", "inferred"
+
+    workspace = pathlib.Path(from_msys_path(raw_workspace)).expanduser().resolve()
     hub_clone = pathlib.Path(from_msys_path(args.hub_clone)).expanduser().resolve()
 
     if args.render:
+        # `source` is left alone across a render. A rendered workspace gains a
+        # settings.json but no `.claude/hooks/` of its own, so the self-certifying
+        # test does not fire on it -- except in the one place it should: rendering
+        # into a hub clone, where `render()` already refuses to clobber the tracked
+        # settings.json and exits 2 before any verdict is reached.
         rc = render(workspace, hub_clone, args.force)
         if rc:
             return rc
 
-    report = verify(workspace)
+    report = verify(workspace, source)
     if args.as_json:
         report["start_line"] = start_line(report)
         print(json.dumps(report, indent=2, sort_keys=True))
@@ -427,10 +562,20 @@ def main(argv: list[str] | None = None) -> int:
 
     print(start_line(report))
     if not report["wired"]:
+        script = REPO_ROOT / "scripts" / "verify-conductor-hooks.py"
         print()
         print("Remedy:")
-        print(f"  python3 {REPO_ROOT / 'scripts' / 'verify-conductor-hooks.py'} \\")
-        print(f"    --render --workspace {workspace} --hub-clone {hub_clone}")
+        if report.get("self_certifying"):
+            # Never offer `--render --workspace <the clone>` here. The clone is the
+            # one directory we have just established says nothing about the session,
+            # and rendering into it would overwrite the hub's own tracked settings.
+            # Re-measure against the real root first; the answer may be "wired".
+            target = report.get("candidate_session_root") or "<session project root>"
+            print(f"  python3 {script} --workspace {target}")
+            print("  # state the root instead of inferring it, then render only if that says NOT WIRED")
+        else:
+            print(f"  python3 {script} \\")
+            print(f"    --render --workspace {workspace} --hub-clone {hub_clone}")
         print("  (docs/runbooks/conductor-hook-wiring.md explains why the copy is a build product)")
     return 0 if report["wired"] else 1
 

@@ -31,14 +31,33 @@ HUB_SETTINGS = REPO_ROOT / ".claude" / "settings.json"
 PLACEHOLDER = "__HUB_CLONE__"
 
 
-def run(*args: str, cwd: str | None = None) -> subprocess.CompletedProcess:
-    """Invoke the verifier. Full env (never a scrubbed dict -- CLAUDE.md), pinned codec (#945)."""
+def run(
+    *args: str, cwd: str | None = None, project_dir: str | None = None
+) -> subprocess.CompletedProcess:
+    """Invoke the verifier. Full env (never a scrubbed dict -- CLAUDE.md), pinned codec (#945).
+
+    `CLAUDE_PROJECT_DIR` is removed unless a test sets it. It is inherited from
+    whatever session runs the suite, and it decides whether a no-argument call
+    counts as *stated* or *inferred* (#1237) -- so leaving it ambient would make
+    the workspace-provenance tests pass or fail according to who ran them, which
+    is the one thing a test about provenance must not do.
+    """
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args],
         capture_output=True,
         encoding="utf-8",
         errors="replace",
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        # Written as an inline literal, not a prepared dict: the encoding scanner
+        # (#962) reads this call statically and cannot follow a variable, so
+        # `env=env` fails `check-subprocess-encoding.py` even when the pin is
+        # correct. Empty string is how "unset" is spelled here -- the verifier
+        # tests `CLAUDE_PROJECT_DIR` for truthiness, so "" and absent take the
+        # same branch, and that keeps the whole env in one readable expression.
+        env={
+            **os.environ,
+            "PYTHONIOENCODING": "utf-8",
+            "CLAUDE_PROJECT_DIR": project_dir or "",
+        },
         cwd=cwd,
         timeout=120,
     )
@@ -442,6 +461,176 @@ def test_the_runbook_exists_and_states_the_chosen_option():
     text = doc.read_text(encoding="utf-8")
     assert "#1042" in text
     assert "verify-conductor-hooks.py" in text
+
+
+# --------------------------------------------------------------------------
+# The multi-repo cloud worker (#1237). L218 named the Conductor as the only
+# unguarded session and the sandboxed agents as the protected class. A scheduled
+# cloud worker clones five FFC repos side by side and runs with its project root
+# set to their PARENT, so it is in the unguarded population too -- and it is the
+# population that does the issue->PR work.
+#
+# Measured in the session that filed this: project root `/home/user`, no
+# `/home/user/.claude` at all, the hub's `.claude/settings.json` present with all
+# four hook events and never loaded. Running this very script from inside the
+# clone with no arguments printed `HOOKS: wired ... exit 0`.
+# --------------------------------------------------------------------------
+
+WORKER_REPOS = (
+    "FFC-Cloudflare-Automation",
+    "FFC-EX-canary",
+    "FFC-IN-FFC_Single_Page_Template",
+    "FFC-IN-Footer_Only_Template",
+    "FFC-IN-ffcadmin.org",
+)
+
+
+def worker_layout(td: str, *, ship_hooks: bool = True) -> tuple[pathlib.Path, pathlib.Path]:
+    """Build the five-repo sandbox layout. Returns (session_root, hub_clone).
+
+    The hub clone gets a `$CLAUDE_PROJECT_DIR`-spelled settings block and a real
+    two-sided guard, exactly like the tracked `.claude/settings.json`. That is
+    what makes the layout dangerous rather than merely wrong: pointed at the
+    clone, every check the verifier runs genuinely passes.
+    """
+    root = pathlib.Path(td) / "home" / "user"
+    root.mkdir(parents=True)
+    for name in WORKER_REPOS:
+        (root / name / ".git").mkdir(parents=True)
+    hub = root / WORKER_REPOS[0]
+    if ship_hooks:
+        (hub / ".claude" / "hooks").mkdir(parents=True)
+        behaving_guard(hub / ".claude" / "hooks" / "guard_bash.py")
+        write_settings(
+            hub,
+            guard_config("$CLAUDE_PROJECT_DIR/.claude/hooks/guard_bash.py"),
+        )
+    return root, hub
+
+
+def test_a_worker_layout_inferred_from_inside_a_clone_is_not_reported_as_wired():
+    """The #1237 false green, pinned.
+
+    Before the provenance check this printed `HOOKS: wired` and exited 0 in a
+    session that loads no hooks whatsoever. If this test ever goes green again,
+    the verifier has started certifying itself.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        _, hub = worker_layout(td)
+        proc = run(cwd=str(hub))
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "UNVERIFIED" in proc.stdout, proc.stdout
+        assert "HOOKS: wired" not in proc.stdout, proc.stdout
+
+
+def test_the_same_clone_is_still_wired_when_the_workspace_is_stated():
+    """The refusal must key on PROVENANCE, not on the config.
+
+    Same bytes on disk as the test above; the only difference is that the
+    workspace was stated. A refusal that fired here too would just be the
+    verifier refusing to work, which would be indistinguishable from a fix.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        _, hub = worker_layout(td)
+        proc = run("--workspace", str(hub))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "HOOKS: wired" in proc.stdout, proc.stdout
+
+
+def test_the_worker_session_root_itself_reports_not_wired():
+    """The true answer for the session #1237 was filed from."""
+    with tempfile.TemporaryDirectory() as td:
+        root, _ = worker_layout(td)
+        proc = run("--workspace", str(root))
+        assert proc.returncode == 1, proc.stdout
+        assert "NOT WIRED" in proc.stdout, proc.stdout
+
+
+def test_rendering_into_the_worker_session_root_wires_it():
+    """AC2: the remedy has to actually work for the five-repo layout, not only
+    for the Conductor's single-workspace one."""
+    with tempfile.TemporaryDirectory() as td:
+        root, hub = worker_layout(td)
+        proc = run("--render", "--workspace", str(root), "--hub-clone", str(REPO_ROOT))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "HOOKS: wired" in proc.stdout, proc.stdout
+        assert (root / ".claude" / "settings.json").is_file()
+        # And the five sibling clones are untouched -- the fix belongs to the
+        # session root, never to a repo checkout that a PR would then carry.
+        assert not (hub / ".claude" / "settings.local.json").exists()
+
+
+def test_the_refusal_names_the_session_root_it_detected():
+    """A refusal that does not say what to pass instead just relocates the problem."""
+    with tempfile.TemporaryDirectory() as td:
+        root, hub = worker_layout(td)
+        proc = run("--json", cwd=str(hub))
+        assert proc.returncode == 1, proc.stdout
+        report = json.loads(proc.stdout)
+        assert report["self_certifying"] is True, report
+        assert report["workspace_source"] == "inferred", report
+        assert report["candidate_session_root"] == str(root), report
+        assert "UNVERIFIED" in report["start_line"], report
+
+
+def test_claude_project_dir_counts_as_stated_not_inferred():
+    """The session sets this variable, so it is a statement of the real root.
+
+    Without this branch the check would refuse every session that *is* correctly
+    rooted at the clone -- the false red that would get the whole thing reverted.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        _, hub = worker_layout(td)
+        proc = run(cwd=str(hub), project_dir=str(hub))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "HOOKS: wired" in proc.stdout, proc.stdout
+
+
+def test_an_inferred_workspace_that_ships_no_hooks_is_still_measured():
+    """Narrow targeting: the hazard is self-certification, not inference itself.
+
+    A workspace whose settings name a guard living somewhere else cannot grade
+    itself, so inferring it is harmless and the verdict must still be computed.
+    Refusing here would make the check a blanket "always pass --workspace" nag.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        root, _ = worker_layout(td, ship_hooks=False)
+        elsewhere = pathlib.Path(td) / "guards"
+        elsewhere.mkdir()
+        behaving_guard(elsewhere / "guard_bash.py")
+        ws = root / WORKER_REPOS[0]
+        write_settings(ws, guard_config(str(elsewhere / "guard_bash.py")))
+        proc = run(cwd=str(ws))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "HOOKS: wired" in proc.stdout, proc.stdout
+
+
+def test_a_lone_clone_with_no_siblings_names_no_session_root():
+    """`candidate_session_root` is a hint, and a wrong hint is worse than none.
+
+    One checkout under a parent says nothing about where the session is rooted,
+    so the parent must not be offered as somewhere to write a settings file.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        lone = pathlib.Path(td) / "solo" / "only-repo"
+        (lone / ".git").mkdir(parents=True)
+        (lone / ".claude" / "hooks").mkdir(parents=True)
+        behaving_guard(lone / ".claude" / "hooks" / "guard_bash.py")
+        write_settings(lone, guard_config("$CLAUDE_PROJECT_DIR/.claude/hooks/guard_bash.py"))
+        proc = run("--json", cwd=str(lone))
+        report = json.loads(proc.stdout)
+        assert report["self_certifying"] is True, report
+        assert report["candidate_session_root"] is None, report
+
+
+def test_a_parent_that_already_has_its_own_claude_is_not_offered_as_the_session_root():
+    """Pointing at a parent that already carries `.claude` is advice to clobber it."""
+    with tempfile.TemporaryDirectory() as td:
+        root, hub = worker_layout(td)
+        (root / ".claude").mkdir()
+        proc = run("--json", cwd=str(hub))
+        report = json.loads(proc.stdout)
+        assert report["candidate_session_root"] is None, report
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
