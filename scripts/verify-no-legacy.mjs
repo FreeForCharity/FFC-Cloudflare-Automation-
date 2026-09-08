@@ -618,6 +618,44 @@ if (process.argv.includes('--self-test')) {
       })(),
       false,
     ],
+
+    // --- isRouterPrefetchAbort -----------------------------------------
+    // ctvip.org, measured directly: the App Router prefetches every footer
+    // link's route in the background, then aborts that fetch the moment the
+    // link scrolls back out of view -- reported as net::ERR_ABORTED on the
+    // bare origin root, on nearly every page, with no missing resource
+    // involved at all.
+    [
+      'an aborted RSC prefetch (Next-Router-Prefetch) is excused',
+      isRouterPrefetchAbort('net::ERR_ABORTED', { 'next-router-prefetch': '1' }),
+      true,
+    ],
+    [
+      'an aborted RSC prefetch (RSC header) is excused',
+      isRouterPrefetchAbort('net::ERR_ABORTED', { rsc: '1' }),
+      true,
+    ],
+    [
+      'an aborted fetch carrying Purpose: prefetch is excused',
+      isRouterPrefetchAbort('net::ERR_ABORTED', { purpose: 'prefetch' }),
+      true,
+    ],
+    [
+      'header matching is case-insensitive on the VALUE, not just the name',
+      isRouterPrefetchAbort('net::ERR_ABORTED', { 'sec-purpose': 'Prefetch;Anticipated' }),
+      true,
+    ],
+    [
+      'an ordinary abort with no prefetch headers is NOT excused',
+      isRouterPrefetchAbort('net::ERR_ABORTED', { accept: 'text/html' }),
+      false,
+    ],
+    [
+      'a real failure (not ERR_ABORTED) is never excused, even with the header',
+      isRouterPrefetchAbort('net::ERR_CONNECTION_REFUSED', { 'next-router-prefetch': '1' }),
+      false,
+    ],
+    ['no headers at all is not excused', isRouterPrefetchAbort('net::ERR_ABORTED', null), false],
   ];
   let failed = 0;
   for (const [name, got, want] of cases) {
@@ -677,6 +715,37 @@ function isLegacy(url) {
   }
   const d = domain.toLowerCase();
   return hostname === d || hostname.endsWith(`.${d}`);
+}
+
+/**
+ * Is an aborted request the App Router cancelling its OWN background
+ * prefetch, rather than something the page actually needed?
+ *
+ * Scrolling the footer into view (below) puts every next/link in it in the
+ * viewport, and the App Router starts fetching each route's RSC payload in
+ * the background as soon as a link is observed -- almost always including
+ * "/", since a footer that links home is the common case. Scrolling back up
+ * takes the link back out of view, and the router aborts that fetch
+ * (net::ERR_ABORTED) via the same IntersectionObserver that started it --
+ * well before the page settles, so no wait placed later in the flow (a
+ * networkidle wait, a delay before closing the context) can catch it,
+ * because the abort has already happened and already been recorded by the
+ * time any such wait would run. Measured directly: on ctvip.org this fires
+ * on essentially every page and always names the bare origin root.
+ *
+ * It is never a missing resource: the page issued no real navigation to it,
+ * nothing on the page links to a broken fetch, and the exact same route
+ * still gets exercised (successfully) by its own entry in `pages`. Detected
+ * by the headers Next attaches to every prefetch it issues, not by the URL
+ * shape, so it holds regardless of which route happens to be prefetched.
+ */
+function isRouterPrefetchAbort(failure, headers) {
+  if (failure !== 'net::ERR_ABORTED') return false;
+  if (!headers) return false;
+  if (headers['next-router-prefetch'] != null) return true;
+  if (headers['rsc'] != null) return true;
+  const purpose = (headers['purpose'] || headers['sec-purpose'] || '').toLowerCase();
+  return purpose.includes('prefetch');
 }
 
 const MIME = {
@@ -818,10 +887,12 @@ async function main() {
     tab.on('requestfailed', (r) => {
       const url = r.url();
       if (isLegacy(url)) return;
-      const entry = `${url} (${r.failure()?.errorText})`;
+      const failure = r.failure()?.errorText;
+      if (isRouterPrefetchAbort(failure, r.headers())) return;
+      const entry = `${url} (${failure})`;
       // Same-origin failures mean the mirror is incomplete. Third-party hosts
       // may simply be unreachable from CI, so those are reported, not fatal.
-      if (url.startsWith(origin)) localMissing.push({ url, why: r.failure()?.errorText });
+      if (url.startsWith(origin)) localMissing.push({ url, why: failure });
       else thirdPartyFailed.push(entry);
     });
     tab.on('response', (r) => {
@@ -842,27 +913,6 @@ async function main() {
       await tab.waitForTimeout(2500);
       await tab.evaluate(() => window.scrollTo(0, 0));
       await tab.waitForTimeout(800);
-
-      // Scrolling to the footer puts every next/link in it in the viewport,
-      // and Next.js prefetches those routes' RSC payload in the background —
-      // almost always including "/", since a footer that links home is the
-      // common case. `ctx.close()` below tears down the context's network
-      // stack immediately, which cancels ANYTHING still in flight; a
-      // same-origin prefetch caught mid-request then reports as
-      // `net::ERR_ABORTED` on the bare origin root, indistinguishable from a
-      // genuinely missing asset. These are local static files served over
-      // loopback with no real network latency, so a bounded wait for the
-      // page to go quiet lets a legitimate prefetch actually finish (and a
-      // truly missing asset still fails, just on its own HTTP status rather
-      // than on our teardown timing).
-      await tab.waitForLoadState('networkidle', { timeout: 5000 }).catch((err) => {
-        // Only swallow the timeout itself -- that's the expected "still busy
-        // after 5s, move on" case. Anything else (page/target closed, a
-        // browser crash) is a real failure and must reach the outer catch
-        // below, which records it as a navigation problem; silently eating
-        // every error here would turn those into false passes instead.
-        if (err?.name !== 'TimeoutError') throw err;
-      });
 
       if (shots) {
         const name = path === '/' ? 'home' : path.replace(/^\/|\/$/g, '').replace(/\//g, '_');
