@@ -818,10 +818,11 @@ async function main() {
     tab.on('requestfailed', (r) => {
       const url = r.url();
       if (isLegacy(url)) return;
-      const entry = `${url} (${r.failure()?.errorText})`;
+      const failure = r.failure()?.errorText;
+      const entry = `${url} (${failure})`;
       // Same-origin failures mean the mirror is incomplete. Third-party hosts
       // may simply be unreachable from CI, so those are reported, not fatal.
-      if (url.startsWith(origin)) localMissing.push({ url, why: r.failure()?.errorText });
+      if (url.startsWith(origin)) localMissing.push({ url, why: failure });
       else thirdPartyFailed.push(entry);
     });
     tab.on('response', (r) => {
@@ -840,10 +841,29 @@ async function main() {
       // widget that never scrolls into view never reveals a missing handler.
       await tab.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
       await tab.waitForTimeout(2500);
-      await tab.evaluate(() => window.scrollTo(0, 0));
-      await tab.waitForTimeout(800);
 
+      // Deliberately NOT scrolling back to the top here. Bringing the footer's
+      // next/links into view above starts the App Router prefetching those
+      // routes' RSC payload in the background; scrolling back away takes them
+      // back OUT of view, and the router aborts that fetch (net::ERR_ABORTED)
+      // via the same IntersectionObserver that started it -- reported on the
+      // requestfailed listener above as a same-origin MISSING LOCAL asset that
+      // was never actually missing. Measured directly: on ctvip.org this fired
+      // on 40 of 41 pages, always naming the bare origin root. It is not a
+      // teardown-timing race (a networkidle wait before ctx.close() below does
+      // not help -- the abort has already happened by then) and Playwright's
+      // synchronous request.headers() does not expose the Sec-Purpose header
+      // that would otherwise identify it, so detecting it after the fact isn't
+      // reliable either. Simplest fix: never trigger the cancel. The footer
+      // links stay in view for the rest of this page's lifetime, so whatever
+      // they prefetch just finishes normally against loopback with no real
+      // network latency, and ctx.close() below has nothing left in flight.
       if (shots) {
+        // A screenshot alone needs the top-of-page framing, and paying the
+        // same false-positive risk to get it is fine here: --shots is a
+        // manual debugging aid, never part of the default CI gate.
+        await tab.evaluate(() => window.scrollTo(0, 0));
+        await tab.waitForTimeout(800);
         const name = path === '/' ? 'home' : path.replace(/^\/|\/$/g, '').replace(/\//g, '_');
         await tab.screenshot({ path: join(shots, `${name}.png`) });
       }
@@ -860,7 +880,19 @@ async function main() {
     // image, which is most real charity sites. A reference the source SERVES
     // is a genuine defect and stays fatal.
 
-    results.push({ path, problems, legacyHits, localMissing, thirdPartyFailed });
+    // Copy the arrays rather than pushing the live references: they are the
+    // SAME objects the requestfailed/response listeners above keep mutating
+    // for the rest of this tab's life (ctx.close() below, or -- when --shots
+    // is set -- the screenshot's own scroll-to-top), so pushing the
+    // references would let a later event silently rewrite a page's verdict
+    // after it was already decided.
+    results.push({
+      path,
+      problems: [...problems],
+      legacyHits: [...legacyHits],
+      localMissing: [...localMissing],
+      thirdPartyFailed: [...thirdPartyFailed],
+    });
     await ctx.close();
   }
 
