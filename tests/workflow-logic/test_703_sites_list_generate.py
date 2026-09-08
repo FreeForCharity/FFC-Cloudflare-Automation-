@@ -149,17 +149,25 @@ def _step_index(name_substring: str) -> int:
     raise AssertionError(f"703 has no step whose name contains {name_substring!r}")
 
 
-def test_703_does_not_dispatch_the_gated_export():
+def test_703_does_not_dispatch_the_gated_export_from_the_collection_step():
     """
     Re-adding 601 to the dispatch loop recreates the second, late approval
     prompt and the timeout that wasted the first one.
+
+    Note the scope: this is about the ARTIFACT-COLLECTION step, which waits on
+    what it dispatches. The job dispatches 601 from its last step by design --
+    see test_703_primes_the_next_export_from_its_last_step.
     """
     body = _export_step_body()
     dispatch_section = body.split("download_latest")[0]
     assert WPMUDEV_WF not in dispatch_section, (
-        f"703 dispatches {WPMUDEV_WF} again. That workflow is gated on `wpmudev-prod`, so "
-        "dispatching it from inside this already-gated job asks for a second approval ten "
-        "minutes after the first, and blocks on it. Let its own cron run it."
+        f"703 dispatches {WPMUDEV_WF} from its artifact-collection step again. That "
+        "workflow is gated on `wpmudev-prod`, so dispatching it from inside this "
+        "already-gated job asks for a second approval ten minutes after the first, and "
+        "then blocks on it. Reuse its newest successful run here and prime the next one "
+        "from the job's LAST step, where nothing waits on the answer. Do NOT reach for a "
+        "cron on 601 instead -- `test_gated_env_hygiene.py` refuses a scheduled, "
+        "reviewer-gated Reads job outright."
     )
 
 
