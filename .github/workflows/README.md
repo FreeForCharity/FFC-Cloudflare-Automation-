@@ -604,7 +604,7 @@ No additional setup is required for these workflows to run. However, to get the 
 
 | # | Workflow | File | Triggers | Safety | Approval env |
 | --- | --- | --- | --- | --- | --- |
-| 601 | WPMUDEV - Export Sites/Domains (Read-only) [WPMUDEV] | `601-wpmudev-export-sites.yml` | schedule, workflow_dispatch | Reads | ✅ wpmudev-prod |
+| 601 | WPMUDEV - Export Sites/Domains (Read-only) [WPMUDEV] | `601-wpmudev-export-sites.yml` | workflow_dispatch | Reads | ✅ wpmudev-prod |
 ### 7xx — GitHub (Website + Repo)
 
 | # | Workflow | File | Triggers | Safety | Approval env |

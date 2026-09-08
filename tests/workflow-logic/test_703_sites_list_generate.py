@@ -118,13 +118,23 @@ def test_the_pr_step_still_branches_from_the_checkout():
 # wasting the approval already spent on this run. Measured 2026-09-07: the
 # operator approved 703, and 601 surfaced as a separate prompt ten minutes later.
 #
-# 601 now runs on its own cron half an hour earlier, so both approvals are
-# pending at the same moment, and 703 reuses 601's newest successful export.
-# The reviewer on `wpmudev-prod` is deliberately KEPT -- this is about when the
+# 703 now reuses 601's newest successful export and dispatches the next one
+# from its LAST step, fire-and-forget. That asks for 601's approval at the one
+# moment an operator is provably present -- they answered this job's own gate
+# minutes earlier -- while nothing in the job depends on the answer.
+#
+# The reviewer on `wpmudev-prod` is deliberately KEPT: this is about when the
 # approval is asked for, not about removing it.
+#
+# A cron on 601 would put both prompts up simultaneously and is what the first
+# draft of this change did. `test_gated_env_hygiene.py` rejects it -- a
+# Reads-level job on a schedule AND a reviewer gate parks at `waiting` with
+# nobody watching -- and that guard deliberately has no allowlist for the
+# scheduled case, so the dispatch-last arrangement is what shipped.
 # --------------------------------------------------------------------------
 
 EXPORT_STEP = "Collect export artifacts"
+DISPATCH_STEP = "Dispatch the gated WPMUDEV export"
 WPMUDEV_WF = "601-wpmudev-export-sites.yml"
 
 
@@ -132,11 +142,11 @@ def _export_step_body() -> str:
     return step_run(WF_NAME, "generate", EXPORT_STEP)
 
 
-def _cron_of(workflow_file: str) -> str:
-    on = load_workflow(workflow_file).get("on") or load_workflow(workflow_file).get(True)
-    schedules = on.get("schedule") or []
-    assert len(schedules) == 1, f"{workflow_file}: expected exactly one cron, got {schedules}"
-    return schedules[0]["cron"]
+def _step_index(name_substring: str) -> int:
+    for i, s in enumerate(_generate_steps()):
+        if name_substring in str(s.get("name", "")):
+            return i
+    raise AssertionError(f"703 has no step whose name contains {name_substring!r}")
 
 
 def test_703_does_not_dispatch_the_gated_export():
@@ -213,19 +223,76 @@ def test_the_ungated_read_lanes_are_still_dispatched():
         )
 
 
-def test_601_runs_before_703_on_the_same_day():
+def test_the_reuse_lookup_is_confined_to_the_default_branch():
     """
-    The decoupling only removes the second prompt if 601's approval is already
-    pending when 703's appears. A later (or differently-scheduled) cron puts it
-    back to arriving after.
+    Raised in review on #1255, and a data-integrity finding rather than a nit.
+    An unconstrained `gh run list --status success` spans every branch, so one
+    successful `workflow_dispatch` of 601 from a feature branch becomes the
+    newest success and its membership data is published in the sites list.
     """
-    wpmudev, sites = _cron_of(WPMUDEV_WF), _cron_of(WF_NAME)
-    w_min, w_hour, _, _, w_dow = wpmudev.split()
-    s_min, s_hour, _, _, s_dow = sites.split()
-    assert w_dow == s_dow, f"601 ({wpmudev}) and 703 ({sites}) no longer run on the same day"
-    assert (int(w_hour), int(w_min)) < (int(s_hour), int(s_min)), (
-        f"601 ({wpmudev}) must run BEFORE 703 ({sites}) so its approval is already pending "
-        "when 703's is granted"
+    body = _export_step_body()
+    lookup = re.search(r"run_id=\$\(gh run list[^)]*--status success[^)]*\)", body, re.S)
+    assert lookup, "the reuse path no longer looks a successful run up with `gh run list`"
+    assert "--branch main" in lookup.group(0), (
+        "the reuse lookup is not confined to the default branch, so a successful "
+        f"dispatch of {WPMUDEV_WF} on ANY branch can become the export the published "
+        f"sites list is built from. Found: {lookup.group(0)}"
+    )
+
+
+def test_703_primes_the_next_export_from_its_last_step():
+    """
+    Reuse without a dispatch is a slow leak: the artifact ages a week per run
+    until STALE_EXPORT_DAYS fires, and nothing ever asks for the approval that
+    would refresh it.
+    """
+    steps = _generate_steps()
+    idx = _step_index(DISPATCH_STEP)
+    assert idx == len(steps) - 1, (
+        "the WPMUDEV dispatch is no longer 703's last step. Its whole point is that "
+        "nothing in this job depends on the second approval; a step after it can only "
+        f"reintroduce that dependency. It is step {idx + 1} of {len(steps)}."
+    )
+    body = str(steps[idx].get("run", ""))
+    assert re.search(rf"gh workflow run\s+{re.escape(WPMUDEV_WF)}\b", body), (
+        f"703's last step no longer dispatches {WPMUDEV_WF}, so nothing ever asks for the "
+        "approval that refreshes the export the step above reuses."
+    )
+
+
+def test_the_priming_dispatch_does_not_wait_for_the_gate():
+    """
+    The defect being fixed was `gh run watch` on a gated run, not the dispatch
+    itself. Re-adding a wait here recreates it exactly, one step further down.
+    """
+    body = str(_generate_steps()[_step_index(DISPATCH_STEP)].get("run", ""))
+    assert "gh run watch" not in body, (
+        "the priming dispatch waits on the run it just created. That is the original "
+        "defect: 601 is gated on `wpmudev-prod`, so the wait blocks on a human who has "
+        "already walked away until the step times out."
+    )
+    assert "--ref main" in body, (
+        "the priming dispatch does not target the default branch, so the run it creates "
+        "will not be found by the `--branch main` reuse lookup above."
+    )
+
+
+def test_601_is_not_itself_put_on_a_schedule():
+    """
+    The premise of the whole arrangement, and the reason it is shaped this way
+    rather than as two crons. `test_gated_env_hygiene.py` owns this rule; the
+    assertion is duplicated here so that a reader who reaches for the obvious
+    fix ("just give 601 a cron") is told why it was not taken, at the file
+    where they are making the change.
+    """
+    wf = load_workflow(WPMUDEV_WF)
+    on = wf.get("on") or wf.get(True) or {}
+    assert "schedule" not in on, (
+        f"{WPMUDEV_WF} has gained a `schedule:` trigger. It is a Reads-level job on the "
+        "reviewer-gated `wpmudev-prod` environment, so a cron parks it at `waiting` with "
+        "nobody watching, to be cancelled by its successor or reaped by janitor 734 -- "
+        "which is what `test_gated_env_hygiene.py` refuses, with no allowlist for the "
+        "scheduled case. 703 dispatches it from its last step instead."
     )
 
 

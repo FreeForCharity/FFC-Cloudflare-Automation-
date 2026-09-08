@@ -1,20 +1,6 @@
 name: '601. WPMUDEV - Export Sites/Domains (Read-only) [WPMUDEV]'
 
 on:
-  # Weekly, 30 minutes ahead of 703 (`0 8 * * 1`), which consumes this export's
-  # artifact. 703 used to dispatch this workflow from inside its own gated job
-  # and then block on `gh run watch` — so the `wpmudev-prod` approval only
-  # appeared ~10 minutes after the `github-prod` one was granted, and if nobody
-  # answered it, 703 sat waiting until it timed out and burned the approval
-  # already spent on it.
-  #
-  # Running on its own cron puts both approvals on the Actions page at the same
-  # moment instead, and decouples the failure: an unapproved export now means
-  # 703 reuses the last successful one, which is the degradation 703 already
-  # documents ("the generator preserves existing membership flags when a source
-  # artifact is absent").
-  schedule:
-    - cron: '30 7 * * 1'
   workflow_dispatch:
     inputs:
       output_file:
