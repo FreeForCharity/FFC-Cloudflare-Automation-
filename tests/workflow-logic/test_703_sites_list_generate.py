@@ -245,7 +245,11 @@ def test_every_run_lookup_is_confined_to_the_default_branch():
     guard written per-call-site would have passed on exactly that state.
     """
     body = _export_step_body()
-    lookups = re.findall(r"run_id=\$\(gh run list.*?\)\n", body, re.S)
+    # Whitespace-tolerant terminator (raised in review on #1258): pinning the
+    # exact `)\n` made a trailing space enough to drop a lookup from the list
+    # and fail the count assertion below. The guard is about `--branch main`,
+    # not about spacing.
+    lookups = re.findall(r"run_id=\$\(gh run list.*?\)[^\S\n]*\n", body, re.S)
     assert len(lookups) == 2, (
         f"expected 703 to look runs up in two places (dispatch lane, reuse lane); "
         f"found {len(lookups)}. If a lane was added or removed, extend this guard "
@@ -265,9 +269,19 @@ def test_the_ungated_lanes_are_dispatched_onto_the_default_branch():
     happens to default to the default branch, so the pair worked by luck;
     stating it makes the lookup's `--branch main` verifiable rather than
     coincidental.
+
+    Raised in review on #1258: the bare matcher also hit COMMENT lines, so
+    prose mentioning `gh workflow run` would fail this guard spuriously. The
+    remedy is to drop comments, NOT to anchor the match at start-of-line as
+    suggested -- that would stop matching a dispatch written mid-line
+    (`... && gh workflow run "$wf"`), which is a silent PASS on an unpinned
+    dispatch. A false fail is cheap; a guard that stops looking is not.
     """
     dispatch_section = _export_step_body().split("download_latest")[0]
-    run_cmds = re.findall(r"gh workflow run.*", dispatch_section)
+    code = "\n".join(
+        ln for ln in dispatch_section.split("\n") if not ln.lstrip().startswith("#")
+    )
+    run_cmds = re.findall(r"gh workflow run.*", code)
     assert run_cmds, "703 dispatches nothing at all any more"
     missing = [c for c in run_cmds if "--ref main" not in c]
     assert not missing, (
