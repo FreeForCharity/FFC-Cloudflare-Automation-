@@ -358,8 +358,14 @@ def probe_guard(guard: pathlib.Path) -> list[dict]:
     return results
 
 
-def verify(workspace: pathlib.Path, source: str = SOURCE_EXPLICIT) -> dict:
+def verify(workspace: pathlib.Path, *, source: str) -> dict:
     """Report on `workspace`. `source` says how that path was chosen (#1237).
+
+    Required and keyword-only, with no default. A default of `SOURCE_EXPLICIT`
+    would mean a caller who simply forgets the argument gets the most-trusting
+    provenance and skips the refusal -- failing open, silently, which is the
+    defect this function exists to prevent. Keyword-only additionally stops a
+    positional call from binding the wrong string as provenance.
 
     `source` is a parameter and not a read of `sys.argv` because it changes the
     VERDICT, not just the wording: an inferred workspace that ships the hooks
@@ -614,7 +620,7 @@ def main(argv: list[str] | None = None) -> int:
         if rc:
             return rc
 
-    report = verify(workspace, source)
+    report = verify(workspace, source=source)
     if args.as_json:
         report["start_line"] = start_line(report)
         print(json.dumps(report, indent=2, sort_keys=True))

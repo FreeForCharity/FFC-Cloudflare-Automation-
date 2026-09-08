@@ -715,11 +715,37 @@ def test_an_unknown_workspace_source_raises_rather_than_certifying():
     with tempfile.TemporaryDirectory() as td:
         _, hub = worker_layout(td)
         try:
-            vch.verify(pathlib.Path(hub), "inferrred")
+            vch.verify(pathlib.Path(hub), source="inferrred")
         except ValueError as exc:
             assert "inferrred" in str(exc), exc
         else:
             raise AssertionError("a typo'd source was accepted and the safeguard skipped")
+
+
+def test_verify_refuses_to_run_without_a_stated_provenance():
+    """`source` has no default, so forgetting it cannot silently mean "trusted".
+
+    A default of `SOURCE_EXPLICIT` would give the most-trusting provenance to the
+    caller who thought about it least, which is the wrong way round for a value
+    that gates the refusal. Keyword-only additionally stops a positional call
+    from binding some other string as provenance.
+    """
+    vch = _vch()
+    with tempfile.TemporaryDirectory() as td:
+        _, hub = worker_layout(td)
+        try:
+            vch.verify(pathlib.Path(hub))
+        except TypeError as exc:
+            assert "source" in str(exc), exc
+        else:
+            raise AssertionError("verify() ran with no provenance and did not object")
+        # And positionally, which is the other way a caller could get it wrong.
+        try:
+            vch.verify(pathlib.Path(hub), "inferred")
+        except TypeError:
+            pass
+        else:
+            raise AssertionError("verify() accepted provenance positionally")
 
 
 def test_the_self_certifying_refusal_is_the_only_thing_that_costs_a_parent_scan():

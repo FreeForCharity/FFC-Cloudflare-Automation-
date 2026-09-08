@@ -36,15 +36,25 @@ which clones five FFC repos side by side and is rooted at their _parent_, where 
 `.claude` at all. For those sessions every "the hook has this covered" sentence in this file is
 prose, and prose you have to actually follow.
 
-Establish which you are, in one command, and **state the workspace** — the bare form infers it from
-the cwd, and a cwd inside a hook-shipping clone certifies itself rather than the session:
+Establish which you are, in one command. **Run it bare — do not pass `--workspace "$PWD"`:**
 
 ```bash
-python3 scripts/verify-conductor-hooks.py --workspace "${CLAUDE_PROJECT_DIR:-$PWD}"
+python3 scripts/verify-conductor-hooks.py
 # HOOKS: wired        -> the rules below are enforced
 # HOOKS: NOT WIRED    -> they are advice; docs/runbooks/conductor-hook-wiring.md has the remedy
-# HOOKS: UNVERIFIED   -> you inferred the workspace; re-run naming the session's real project root
+# HOOKS: UNVERIFIED   -> it had to guess; the message names the root -- re-run with --workspace <that>
 ```
+
+Bare is not the lazy form here, it is the **safe** one: with no flag the script uses
+`$CLAUDE_PROJECT_DIR` when the session exports it (a statement of the real root) and otherwise
+refuses to certify a workspace it had to guess. `--workspace "$PWD"` looks more rigorous and is
+strictly worse — it launders the guess into a statement, and from inside a clone that ships
+`.claude/hooks/` it reports **`HOOKS: wired`, exit 0** for a session that loads nothing.
+
+That is not hypothetical: this section shipped with `--workspace "${CLAUDE_PROJECT_DIR:-$PWD}"` for
+one commit, and in a five-repo worker session — where `$CLAUDE_PROJECT_DIR` is unset, so the
+fallback takes over — the command it told every agent to run returned exactly that false green. Pass
+`--workspace` only when you **know** the session's project root; never as a stand-in for knowing.
 
 **A worker that comes back NOT WIRED can wire itself, and the fix takes effect immediately — this is
 measured, not assumed.** Rendering the tracked template into the session root:

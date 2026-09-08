@@ -1087,14 +1087,23 @@ python3 scripts/verify-conductor-hooks.py --workspace "$PWD"          # bootstra
 python3 scripts/verify-conductor-hooks.py --render --workspace <ws>   # one-time wiring
 ```
 
-⚠️ **`--workspace` is not optional in practice — always state it, and state the SESSION's project
-root rather than wherever you happen to be.** Dropping it made this script certify itself (#1237).
-Run with no arguments from inside the clone, it used to print `HOOKS: wired … exit 0` in the
-five-repo cloud-worker session, whose project root is `/home/user` and which loads nothing at all.
-Nothing about that was dishonest: the guard it found was real, the two-sided probe genuinely passed,
-and every check resolved — against the clone, which was not the session. A verifier written to make
-L218's false green impossible had its own, reached through its default argument, and the reassuring
-direction is the default's.
+⚠️ **State `--workspace` when you KNOW the session's project root — and never pass `$PWD` as a
+stand-in for knowing.** The Conductor's bootstrap line above is correct because that session's cwd
+_is_ its project root; the same spelling in any other session is a laundered guess. An agent whose
+cwd is a clone should run the script **bare**, which uses `$CLAUDE_PROJECT_DIR` when the session
+exports it and refuses rather than certifying when it must guess.
+
+The blunt version of this rule ("always state it") shipped in `AGENTS.md` for one commit as
+`--workspace "${CLAUDE_PROJECT_DIR:-$PWD}"`, and in a worker session — where that variable is unset
+— it returned `HOOKS: wired, exit 0` for a session loading nothing: the advice reintroduced the
+defect it was written to prevent. Dropping the flag entirely is what made this script certify itself
+in the first place (#1237), so the two failures bracket the same mistake from opposite sides — the
+flag is not the point, **knowing** is. Run with no arguments from inside the clone, it used to print
+`HOOKS: wired … exit 0` in the five-repo cloud-worker session, whose project root is `/home/user`
+and which loads nothing at all. Nothing about that was dishonest: the guard it found was real, the
+two-sided probe genuinely passed, and every check resolved — against the clone, which was not the
+session. A verifier written to make L218's false green impossible had its own, reached through its
+default argument, and the reassuring direction is the default's.
 
 Since #1237 that case is refused rather than certified: an **inferred** workspace (the cwd fallback,
 never `--workspace` or `$CLAUDE_PROJECT_DIR`) that itself ships `.claude/hooks/` reports
