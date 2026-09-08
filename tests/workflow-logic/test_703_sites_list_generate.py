@@ -29,14 +29,18 @@ from __future__ import annotations
 import pathlib
 import sys
 
-import yaml
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from wf_extract import load_workflow
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-WF = REPO_ROOT / ".github" / "workflows" / "703-sites-list-generate.yml"
+WF_NAME = "703-sites-list-generate.yml"
 
 
 def _workflow() -> dict:
-    return yaml.safe_load(WF.read_text(encoding="utf-8"))
+    # Shared helper rather than a local read (raised in review on #1254): it
+    # centralises the utf-8 rationale, which is not cosmetic — workflow files
+    # here carry ✓/❌/em-dashes, and a cp1252 decode on Windows crashes the
+    # module before any test runs, printing a traceback instead of FAIL lines.
+    return load_workflow(WF_NAME)
 
 
 def _generate_steps() -> list[dict]:
