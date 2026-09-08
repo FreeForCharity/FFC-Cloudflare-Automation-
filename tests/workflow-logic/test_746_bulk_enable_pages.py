@@ -1,7 +1,9 @@
 """Unit tests for 746's two steps (bash, fake gh): the ungated preflight
-(normalize/dedup, per-domain repo+deploy.yml existence, aggregate skip
-counting, all-skipped fail-closed) and the gated enable-pages loop
-(idempotent Pages-enable, deploy dispatch, partial-failure fails the step).
+(normalize/dedup, per-domain repo+deploy.yml existence including a
+non-default default_branch, aggregate skip counting, all-skipped
+fail-closed) and the gated enable-pages loop (idempotent Pages-enable that
+tells a real "not configured yet" 404 from a genuine failure, deploy
+dispatch on the repo's own default branch, partial-failure fails the step).
 
 746 is 732's own follow-up: 732 can only turn Pages on at CREATE time, and
 its preflight skips any domain whose repo already exists, so this module
@@ -59,7 +61,9 @@ def run_preflight(env_overrides: dict) -> tuple[subprocess.CompletedProcess, str
 
 def run_enable(env_overrides: dict) -> tuple[subprocess.CompletedProcess, str]:
     script = step_run(
-        "746-bulk-enable-pages.yml", "enable-pages", "Enable Pages + dispatch deploy for each ready domain"
+        "746-bulk-enable-pages.yml",
+        "enable-pages",
+        "Enable Pages + dispatch deploy for each ready domain",
     )
     with tempfile.TemporaryDirectory() as td:
         tdp = pathlib.Path(td)
@@ -69,7 +73,7 @@ def run_enable(env_overrides: dict) -> tuple[subprocess.CompletedProcess, str]:
             HARNESS_DIR,
             GITHUB_STEP_SUMMARY=str(summary),
             HOME=str(tdp),
-            IN_READY_DOMAINS='["example.org"]',
+            IN_READY_DOMAINS='[{"domain":"example.org","branch":"main"}]',
             IN_DRY_RUN="true",
         )
         env.update(env_overrides)
@@ -84,6 +88,10 @@ def run_enable(env_overrides: dict) -> tuple[subprocess.CompletedProcess, str]:
         return proc, summary.read_text(encoding="utf-8")
 
 
+def ready_domains(out: dict) -> list[str]:
+    return [r["domain"] for r in json.loads(out["ready_domains"])]
+
+
 def test_multiple_ready_domains_all_survive():
     proc, _, out = run_preflight(
         {
@@ -92,8 +100,7 @@ def test_multiple_ready_domains_all_survive():
         }
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    ready = json.loads(out["ready_domains"])
-    assert ready == ["one.org", "two.org", "three.org"], ready
+    assert ready_domains(out) == ["one.org", "two.org", "three.org"], out
     assert out["ready_count"] == "3", out
     assert out["skipped_count"] == "0", out
 
@@ -106,8 +113,21 @@ def test_normalization_dedup_and_case():
         }
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    ready = json.loads(out["ready_domains"])
-    assert ready == ["one.org", "two.org"], ready
+    assert ready_domains(out) == ["one.org", "two.org"], out
+
+
+def test_pasted_url_path_query_and_fragment_are_stripped():
+    # Copilot review (#1252): a pasted URL's path/query/fragment must not
+    # survive into the repo name, only the bare-slash strip existed before.
+    proc, _, out = run_preflight(
+        {
+            "IN_DOMAINS": "https://example.org/foo?x=1,https://example.org/bar#frag",
+            "TEST_REPO_META": '{"full_name": "FreeForCharity/FFC-EX-example.org"}',
+        }
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    # Both inputs normalize to the same bare domain and dedup to one entry.
+    assert ready_domains(out) == ["example.org"], out
 
 
 def test_empty_domains_input_fails():
@@ -143,6 +163,19 @@ def test_repo_without_deploy_yml_is_skipped_not_fatal():
     assert "no deploy.yml" in summary, summary
 
 
+def test_non_default_branch_is_captured_and_reported():
+    proc, summary, out = run_preflight(
+        {
+            "IN_DOMAINS": "one.org",
+            "TEST_REPO_META": '{"full_name": "FreeForCharity/FFC-EX-one.org", "default_branch": "trunk"}',
+        }
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    ready = json.loads(out["ready_domains"])
+    assert ready == [{"domain": "one.org", "branch": "trunk"}], ready
+    assert "| one.org | FFC-EX-one.org | trunk |" in summary, summary
+
+
 def test_mixed_batch_reports_ready_and_skipped_independently():
     # The fake `gh` cannot vary TEST_REPO_META/TEST_DEPLOY_YML_MISSING by
     # domain, so this exercises the one axis that DOES differ per call inside
@@ -163,18 +196,18 @@ def test_mixed_batch_reports_ready_and_skipped_independently():
 def test_dry_run_reads_pages_state_but_never_writes():
     # The Pages GET is a read and runs even in a dry run (it is how the
     # summary can honestly say "already enabled" instead of guessing); only
-    # the POST/dispatch WRITES are skipped. TEST_PAGES_GET_FAIL=1 simulates
-    # "not yet configured" so the dry-run path reaches the "would enable"
-    # branch instead of "already enabled".
-    proc, summary = run_enable({"IN_DRY_RUN": "true", "TEST_PAGES_GET_FAIL": "1"})
+    # the POST/dispatch WRITES are skipped. TEST_PAGES_NOT_CONFIGURED=1
+    # simulates the real "not yet configured" 404 shape so the dry-run path
+    # reaches the "would enable" branch instead of "already enabled".
+    proc, summary = run_enable({"IN_DRY_RUN": "true", "TEST_PAGES_NOT_CONFIGURED": "1"})
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "[DRY RUN] would enable" in summary, summary
-    assert "[DRY RUN] would dispatch" in summary, summary
+    assert "[DRY RUN] would dispatch deploy.yml on main" in summary, summary
 
 
 def test_already_enabled_pages_is_left_alone():
-    # GET succeeds (default TEST_PAGES_GET_FAIL unset) -> "already enabled",
-    # and the live path must never issue a POST for it.
+    # GET succeeds (no failure knob set) -> "already enabled", and the live
+    # path must never issue a POST for it.
     proc, summary = run_enable({"IN_DRY_RUN": "false"})
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "already enabled" in summary, summary
@@ -185,7 +218,7 @@ def test_live_enable_and_dispatch_succeed():
     proc, summary = run_enable(
         {
             "IN_DRY_RUN": "false",
-            "TEST_PAGES_GET_FAIL": "1",  # not yet configured -> POST path
+            "TEST_PAGES_NOT_CONFIGURED": "1",  # real 404 -> POST path
         }
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -193,11 +226,30 @@ def test_live_enable_and_dispatch_succeed():
     assert "dispatched" in summary, summary
 
 
-def test_pages_post_failure_fails_the_step():
+def test_genuine_pages_get_failure_never_attempts_a_write():
+    # Copilot review (#1252): a 403/5xx on the GET is not "not configured" —
+    # it must fail the step WITHOUT a POST attempt. TEST_PAGES_POST_FAIL is
+    # also set so that if the (buggy) old behavior attempted a POST anyway,
+    # it would still show as a failure either way — but the summary text
+    # proves which branch actually ran.
     proc, summary = run_enable(
         {
             "IN_DRY_RUN": "false",
             "TEST_PAGES_GET_FAIL": "1",
+            "TEST_PAGES_POST_FAIL": "1",
+        }
+    )
+    assert proc.returncode != 0, proc.stdout
+    assert "could not read Pages state" in summary, summary
+    assert "enable failed" not in summary, summary
+    assert "operation(s) failed" in proc.stdout, proc.stdout
+
+
+def test_pages_post_failure_fails_the_step():
+    proc, summary = run_enable(
+        {
+            "IN_DRY_RUN": "false",
+            "TEST_PAGES_NOT_CONFIGURED": "1",
             "TEST_PAGES_POST_FAIL": "1",
         }
     )
@@ -218,10 +270,21 @@ def test_dispatch_failure_fails_the_step():
     assert "operation(s) failed" in proc.stdout, proc.stdout
 
 
+def test_non_main_branch_is_used_for_the_live_dispatch():
+    proc, summary = run_enable(
+        {
+            "IN_READY_DOMAINS": '[{"domain":"one.org","branch":"trunk"}]',
+            "IN_DRY_RUN": "false",
+        }
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "dispatched (trunk)" in summary, summary
+
+
 def test_multiple_ready_domains_each_get_a_summary_row():
     proc, summary = run_enable(
         {
-            "IN_READY_DOMAINS": '["one.org","two.org"]',
+            "IN_READY_DOMAINS": '[{"domain":"one.org","branch":"main"},{"domain":"two.org","branch":"main"}]',
             "IN_DRY_RUN": "true",
         }
     )

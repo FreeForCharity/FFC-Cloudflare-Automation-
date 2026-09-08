@@ -72,7 +72,13 @@ jobs:
             d="${d%"${d##*[![:space:]]}"}"
             [ -z "$d" ] && continue
             d="$(printf '%s' "$d" | tr '[:upper:]' '[:lower:]')"
-            d="${d#https://}"; d="${d#http://}"; d="${d%/}"; d="${d#www.}"
+            d="${d#https://}"; d="${d#http://}"
+            # Truncate at the first /, ?, or # so a pasted URL's path/query/fragment
+            # never survives into the repo name (Copilot review, #1252) -- this also
+            # subsumes the old trailing-slash strip, since a bare trailing slash is
+            # just an empty path segment.
+            d="${d%%[/?#]*}"
+            d="${d#www.}"
             [ -z "$d" ] && continue
             if [ -z "${seen[$d]:-}" ]; then
               seen[$d]=1
@@ -91,8 +97,8 @@ jobs:
           {
             echo "## Bulk enable-Pages preflight"
             echo ""
-            echo "| Domain | Repo name | deploy.yml | Verdict |"
-            echo "| --- | --- | --- | --- |"
+            echo "| Domain | Repo name | Default branch | deploy.yml | Verdict |"
+            echo "| --- | --- | --- | --- | --- |"
           } >> "$GITHUB_STEP_SUMMARY"
 
           for d in "${domains[@]}"; do
@@ -103,26 +109,31 @@ jobs:
             rc=$?
             set -e
             if [ $rc -ne 0 ]; then
-              echo "| $d | $name | — | ⛔ repo not found |" >> "$GITHUB_STEP_SUMMARY"
+              echo "| $d | $name | — | — | ⛔ repo not found |" >> "$GITHUB_STEP_SUMMARY"
               skipped=$((skipped + 1))
               continue
             fi
 
+            # The dispatch target must be the repo's OWN default branch, not a
+            # hardcoded 'main' — a repo using a different default would otherwise
+            # pass preflight and still fail to dispatch (Copilot review, #1252).
+            branch=$(printf '%s' "$resp" | jq -r '.default_branch // "main"')
+
             set +e
-            wf=$(gh api "repos/$owner/$name/contents/.github/workflows/deploy.yml" 2>&1)
+            wf=$(gh api "repos/$owner/$name/contents/.github/workflows/deploy.yml?ref=$branch" 2>&1)
             wfrc=$?
             set -e
             if [ $wfrc -ne 0 ]; then
-              echo "| $d | $name | ⛔ missing | ⛔ no deploy.yml on default branch |" >> "$GITHUB_STEP_SUMMARY"
+              echo "| $d | $name | $branch | ⛔ missing | ⛔ no deploy.yml on default branch |" >> "$GITHUB_STEP_SUMMARY"
               skipped=$((skipped + 1))
               continue
             fi
 
-            echo "| $d | $name | ✅ present | ✅ ready |" >> "$GITHUB_STEP_SUMMARY"
-            ready+=("$d")
+            echo "| $d | $name | $branch | ✅ present | ✅ ready |" >> "$GITHUB_STEP_SUMMARY"
+            ready+=("$(jq -n -c --arg d "$d" --arg b "$branch" '{domain: $d, branch: $b}')")
           done
 
-          ready_json=$(printf '%s\n' "${ready[@]+"${ready[@]}"}" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          ready_json=$(printf '%s\n' "${ready[@]+"${ready[@]}"}" | jq -s -c 'map(select(. != null))')
           {
             echo "ready_domains=$ready_json"
             echo "ready_count=${#ready[@]}"
@@ -221,45 +232,55 @@ jobs:
             echo "| --- | --- | --- |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          while IFS= read -r d; do
+          while IFS=$'\t' read -r d branch; do
             [ -z "$d" ] && continue
             full="$owner/FFC-EX-$d"
 
             # Idempotent: GET first, only POST (build_type=workflow, no CNAME — the
             # GitHub-default URL only) if Pages isn't already configured, so a repo
             # that already has a live custom domain (set later, by a separate step)
-            # is never touched here.
+            # is never touched here. `gh` puts its error body on stdout/stderr with a
+            # non-zero exit (same shape 732's preflight already relies on), so "not
+            # configured yet" (a real 404) is distinguished from a genuine failure
+            # (401/403/5xx) by grepping for it, rather than treating every non-zero
+            # exit as "needs enable" (Copilot review, #1252) -- the latter would
+            # attempt a write against a repo whose Pages state could not even be read.
             set +e
-            gh api "repos/$full/pages" >/dev/null 2>&1
+            pages_resp=$(gh api "repos/$full/pages" 2>&1)
             pages_rc=$?
             set -e
 
             if [ $pages_rc -eq 0 ]; then
               pages_status="already enabled"
-            elif [ "${IN_DRY_RUN:-true}" = "true" ]; then
-              pages_status="[DRY RUN] would enable (build_type=workflow)"
-            else
-              set +e
-              gh api -X POST "repos/$full/pages" -F "build_type=workflow" >/dev/null 2>&1
-              prc=$?
-              set -e
-              if [ $prc -eq 0 ]; then
-                pages_status="enabled (build_type=workflow)"
+            elif printf '%s' "$pages_resp" | grep -q "HTTP 404"; then
+              if [ "${IN_DRY_RUN:-true}" = "true" ]; then
+                pages_status="[DRY RUN] would enable (build_type=workflow)"
               else
-                pages_status="❌ enable failed"
-                fail_count=$((fail_count + 1))
+                set +e
+                gh api -X POST "repos/$full/pages" -F "build_type=workflow" >/dev/null 2>&1
+                prc=$?
+                set -e
+                if [ $prc -eq 0 ]; then
+                  pages_status="enabled (build_type=workflow)"
+                else
+                  pages_status="❌ enable failed"
+                  fail_count=$((fail_count + 1))
+                fi
               fi
+            else
+              pages_status="❌ could not read Pages state (not a 404 -- see run log)"
+              fail_count=$((fail_count + 1))
             fi
 
             if [ "${IN_DRY_RUN:-true}" = "true" ]; then
-              deploy_status="[DRY RUN] would dispatch deploy.yml on main"
+              deploy_status="[DRY RUN] would dispatch deploy.yml on $branch"
             else
               set +e
-              gh api -X POST "repos/$full/actions/workflows/deploy.yml/dispatches" -F "ref=main" >/dev/null 2>&1
+              gh api -X POST "repos/$full/actions/workflows/deploy.yml/dispatches" -F "ref=$branch" >/dev/null 2>&1
               drc=$?
               set -e
               if [ $drc -eq 0 ]; then
-                deploy_status="dispatched"
+                deploy_status="dispatched ($branch)"
               else
                 deploy_status="❌ dispatch failed"
                 fail_count=$((fail_count + 1))
@@ -267,7 +288,7 @@ jobs:
             fi
 
             echo "| $d | $pages_status | $deploy_status |" >> "$GITHUB_STEP_SUMMARY"
-          done <<<"$(printf '%s' "$IN_READY_DOMAINS" | jq -r '.[]')"
+          done <<<"$(printf '%s' "$IN_READY_DOMAINS" | jq -r '.[] | "\(.domain)\t\(.branch)"')"
 
           if [ $fail_count -gt 0 ]; then
             # Fail the STEP (and job), matching 732's own partial-failure fix (#1250
