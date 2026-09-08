@@ -151,8 +151,8 @@ jobs:
           # NOTE: both display names AND file names get renumbered periodically,
           # so keep these in sync with .github/workflows/ (last synced 2026-09-08).
           for wf in 201-whmcs-export-domains.yml 108-export-summary.yml; do
-            echo "Dispatching $wf ..."
-            gh workflow run "$wf" --repo "$REPO"
+            echo "Dispatching $wf on main ..."
+            gh workflow run "$wf" --repo "$REPO" --ref main
           done
 
           # Give the dispatched runs time to register before querying them.
@@ -163,9 +163,18 @@ jobs:
           # membership flags when a source artifact is absent.
           download_latest () {
             local wf="$1" artifact="$2" dir="$3" run_id
-            # Only consider workflow_dispatch runs (the ones we just triggered),
-            # to avoid picking up a concurrent scheduled or older run.
-            run_id=$(gh run list --workflow "$wf" --repo "$REPO" --event workflow_dispatch \
+            # Narrow to workflow_dispatch runs on `main`, which is where the loop
+            # above dispatches. `--event` alone excludes a concurrent scheduled
+            # run but NOT a dispatch from someone's feature branch, so without
+            # `--branch main` this lane had the same defect as the reuse lane
+            # below: feature-branch export data published in the sites list
+            # through a run that looks entirely normal (raised in review, #1255).
+            #
+            # This narrows the window rather than closing it -- `--limit 1` still
+            # takes the newest matching run, which a manual dispatch on `main`
+            # racing this one could win. Both candidates are then main's own
+            # export, so the cost is staleness, not unreviewed data.
+            run_id=$(gh run list --workflow "$wf" --repo "$REPO" --event workflow_dispatch --branch main \
               --limit 1 --json databaseId --jq '.[0].databaseId // empty')
             if [ -z "$run_id" ]; then
               echo "::warning::No workflow_dispatch run found for $wf; continuing without its data."
