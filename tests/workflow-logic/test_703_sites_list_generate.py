@@ -27,10 +27,11 @@ Run: python3 tests/workflow-logic/test_703_sites_list_generate.py
 from __future__ import annotations
 
 import pathlib
+import re
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from wf_extract import load_workflow
+from wf_extract import find_step, load_workflow, step_run
 
 WF_NAME = "703-sites-list-generate.yml"
 
@@ -104,6 +105,127 @@ def test_the_pr_step_still_branches_from_the_checkout():
     assert base in (None, "main"), (
         "create-pull-request carries an explicit `base` that is not `main`, so the "
         f"checkout ref no longer determines what the data PR branches from: {base!r}"
+    )
+
+
+# --------------------------------------------------------------------------
+# The 601 decoupling.
+#
+# 703 used to dispatch 601 from inside its own gated job and block on
+# `gh run watch`. 601 sits on `wpmudev-prod`, which has a required reviewer, so
+# the second approval prompt only APPEARED ~10 minutes after this job's own was
+# granted -- and if nobody answered it, the step waited until it timed out,
+# wasting the approval already spent on this run. Measured 2026-09-07: the
+# operator approved 703, and 601 surfaced as a separate prompt ten minutes later.
+#
+# 601 now runs on its own cron half an hour earlier, so both approvals are
+# pending at the same moment, and 703 reuses 601's newest successful export.
+# The reviewer on `wpmudev-prod` is deliberately KEPT -- this is about when the
+# approval is asked for, not about removing it.
+# --------------------------------------------------------------------------
+
+EXPORT_STEP = "Collect export artifacts"
+WPMUDEV_WF = "601-wpmudev-export-sites.yml"
+
+
+def _export_step_body() -> str:
+    return step_run(WF_NAME, "generate", EXPORT_STEP)
+
+
+def _cron_of(workflow_file: str) -> str:
+    on = load_workflow(workflow_file).get("on") or load_workflow(workflow_file).get(True)
+    schedules = on.get("schedule") or []
+    assert len(schedules) == 1, f"{workflow_file}: expected exactly one cron, got {schedules}"
+    return schedules[0]["cron"]
+
+
+def test_703_does_not_dispatch_the_gated_export():
+    """
+    Re-adding 601 to the dispatch loop recreates the second, late approval
+    prompt and the timeout that wasted the first one.
+    """
+    body = _export_step_body()
+    dispatch_section = body.split("download_latest")[0]
+    assert WPMUDEV_WF not in dispatch_section, (
+        f"703 dispatches {WPMUDEV_WF} again. That workflow is gated on `wpmudev-prod`, so "
+        "dispatching it from inside this already-gated job asks for a second approval ten "
+        "minutes after the first, and blocks on it. Let its own cron run it."
+    )
+
+
+def test_703_still_consumes_the_gated_export():
+    """
+    Dropping the dispatch without the reuse would silently stop feeding WPMUDEV
+    membership into the sites list -- green, and quietly wrong.
+    """
+    body = _export_step_body()
+    # Anchored on the call itself, not on the two strings appearing anywhere in
+    # the step: an `or` between a precise check and a loose one is only ever as
+    # strong as the loose one.
+    assert re.search(rf"download_latest_success\s+{re.escape(WPMUDEV_WF)}\s", body), (
+        f"703 no longer reuses {WPMUDEV_WF}'s artifact. Dropping the dispatch without the "
+        "reuse silently stops feeding WPMUDEV membership into the sites list."
+    )
+
+
+def test_the_reused_export_reports_its_age():
+    """
+    A reused artifact is by definition old. Using one silently is how the sites
+    list would carry stale membership flags with nothing saying so.
+    """
+    body = _export_step_body()
+    # Assert the COMPARISON, not that the words appear. The first version of this
+    # guard checked only that `STALE_EXPORT_DAYS` and `::warning::` were present
+    # somewhere in the step, and a mutation replacing the condition with
+    # `if false; then` passed it — the names survive while the check does not.
+    cond = re.search(
+        r'if\s+\[\s+"\$age_days"\s+-ge\s+"\$STALE_EXPORT_DAYS"\s+\]', body
+    )
+    assert cond, (
+        "the reuse path no longer compares the artifact's age against "
+        "STALE_EXPORT_DAYS, so a months-old export would be used silently"
+    )
+    # ...and that the branch it guards is the one that warns.
+    after = body[cond.end() :].split("fi", 1)[0]
+    assert "::warning::" in after, (
+        "the staleness branch no longer warns; a stale reused export would pass quietly"
+    )
+    step = find_step(_workflow(), "generate", EXPORT_STEP)
+    threshold = (step.get("env") or {}).get("STALE_EXPORT_DAYS")
+    assert threshold is not None and int(threshold) > 0, (
+        "STALE_EXPORT_DAYS is not set to a positive value in the step's env, so the "
+        f"comparison above reads an empty string and never fires. Found: {threshold!r}"
+    )
+
+
+def test_the_ungated_read_lanes_are_still_dispatched():
+    """
+    201 and 108 are ungated (`whmcs-prod-read` / `cloudflare-prod-read`), so
+    dispatch-and-wait costs nothing. Moving them to reuse would make the sites
+    list a week stale for no benefit.
+    """
+    dispatch_section = _export_step_body().split("download_latest")[0]
+    assert "gh workflow run" in dispatch_section, "703 dispatches nothing at all any more"
+    for wf in ("201-whmcs-export-domains.yml", "108-export-summary.yml"):
+        assert wf in dispatch_section, (
+            f"703 no longer dispatches {wf}. It is an ungated read lane, so reusing an old "
+            "run would make the sites list a week stale for no benefit."
+        )
+
+
+def test_601_runs_before_703_on_the_same_day():
+    """
+    The decoupling only removes the second prompt if 601's approval is already
+    pending when 703's appears. A later (or differently-scheduled) cron puts it
+    back to arriving after.
+    """
+    wpmudev, sites = _cron_of(WPMUDEV_WF), _cron_of(WF_NAME)
+    w_min, w_hour, _, _, w_dow = wpmudev.split()
+    s_min, s_hour, _, _, s_dow = sites.split()
+    assert w_dow == s_dow, f"601 ({wpmudev}) and 703 ({sites}) no longer run on the same day"
+    assert (int(w_hour), int(w_min)) < (int(s_hour), int(s_min)), (
+        f"601 ({wpmudev}) must run BEFORE 703 ({sites}) so its approval is already pending "
+        "when 703's is granted"
     )
 
 

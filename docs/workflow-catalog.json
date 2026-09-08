@@ -1541,6 +1541,7 @@
       ],
       "file": "601-wpmudev-export-sites.yml",
       "triggers": [
+        "schedule",
         "workflow_dispatch"
       ],
       "environments": [

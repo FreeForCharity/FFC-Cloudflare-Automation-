@@ -84,6 +84,7 @@ jobs:
             320. Azure - Key Vault Secret Inventory (audit) [MS]
             321. Azure - KV Credential Liveness + Expiry Monitor [MS+GH+CF]
             502. Google - Analytics Report (GA4 -> JSON) [GOOGLE]
+            601. WPMUDEV - Export Sites/Domains (Read-only) [WPMUDEV]
             504. Google - GTM Container Backups (weekly export) [GOOGLE]
             506. Google - Fleet Telemetry Reachability [GOOGLE]
             703. Sites List - Generate (CSV + JSON) [GH]

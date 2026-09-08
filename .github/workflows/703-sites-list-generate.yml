@@ -124,16 +124,32 @@ jobs:
             echo "$token"
             echo "${d}"
           } >> "$GITHUB_ENV"
-      - name: Trigger export workflows and download artifacts
+      - name: Collect export artifacts (dispatch the ungated, reuse the gated)
         env:
           REPO: ${{ github.repository }}
+          # Age past which a reused export is called out rather than used quietly.
+          # Two missed weekly cycles: one skipped approval is routine, three weeks
+          # of stale WPMUDEV membership flags is something to know about.
+          STALE_EXPORT_DAYS: '14'
         run: |
           set -euo pipefail
 
-          # Dispatch the three read-only export workflows by file name.
+          # 201 and 108 are ungated read lanes (`whmcs-prod-read`,
+          # `cloudflare-prod-read`), so dispatching them and waiting costs
+          # nothing but the minute they take.
+          #
+          # 601 is NOT dispatched. It sits on `wpmudev-prod`, which has a
+          # required reviewer, so dispatching it from inside this already-gated
+          # job produced a SECOND approval prompt ~10 minutes after this job's
+          # own was granted — and `gh run watch` below then blocked on a human
+          # who had already walked away, until the step timed out and wasted the
+          # approval spent on this run. 601 now runs on its own cron 30 minutes
+          # earlier (`30 7 * * 1`), so both approvals are pending at the same
+          # moment, and this job reuses its most recent SUCCESSFUL export.
+          #
           # NOTE: both display names AND file names get renumbered periodically,
-          # so keep these in sync with .github/workflows/ (last synced 2026-07-07).
-          for wf in 201-whmcs-export-domains.yml 108-export-summary.yml 601-wpmudev-export-sites.yml; do
+          # so keep these in sync with .github/workflows/ (last synced 2026-09-08).
+          for wf in 201-whmcs-export-domains.yml 108-export-summary.yml; do
             echo "Dispatching $wf ..."
             gh workflow run "$wf" --repo "$REPO"
           done
@@ -163,9 +179,33 @@ jobs:
               || echo "::warning::Could not download artifact '$artifact' from $wf."
           }
 
-          download_latest 201-whmcs-export-domains.yml  whmcs_domains            tmp_data/whmcs_domains
-          download_latest 108-export-summary.yml        domain_summary           tmp_data/domain_summary
-          download_latest 601-wpmudev-export-sites.yml  wpmudev-domain-inventory tmp_data/wpmudev-domain-inventory
+          # Reuse the newest SUCCESSFUL run of a workflow this job does not
+          # dispatch, whatever event produced it. Unlike download_latest above,
+          # "no run" and "an old run" are different outcomes and both are
+          # reported: a silently-absent export would leave the sites list
+          # carrying last week's membership flags with nothing saying so, which
+          # is the failure shape this repo keeps rediscovering.
+          download_latest_success () {
+            local wf="$1" artifact="$2" dir="$3" run_id created age_days
+            run_id=$(gh run list --workflow "$wf" --repo "$REPO" --status success \
+              --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+            if [ -z "$run_id" ]; then
+              echo "::warning::$wf has no successful run to reuse; continuing without its data. If its approval gate has gone unanswered, approve it and re-run this workflow."
+              return 0
+            fi
+            created=$(gh run view "$run_id" --repo "$REPO" --json createdAt --jq '.createdAt')
+            age_days=$(( ( $(date -u +%s) - $(date -u -d "$created" +%s) ) / 86400 ))
+            echo "Reusing $wf run $run_id from $created (${age_days}d old)."
+            if [ "$age_days" -ge "$STALE_EXPORT_DAYS" ]; then
+              echo "::warning::$wf's newest successful run is ${age_days} days old (threshold ${STALE_EXPORT_DAYS}). Its approval gate is likely going unanswered; the sites list is carrying stale data from it."
+            fi
+            gh run download "$run_id" --repo "$REPO" --name "$artifact" --dir "$dir" \
+              || echo "::warning::Could not download artifact '$artifact' from $wf run $run_id."
+          }
+
+          download_latest         201-whmcs-export-domains.yml  whmcs_domains            tmp_data/whmcs_domains
+          download_latest         108-export-summary.yml        domain_summary           tmp_data/domain_summary
+          download_latest_success 601-wpmudev-export-sites.yml  wpmudev-domain-inventory tmp_data/wpmudev-domain-inventory
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
