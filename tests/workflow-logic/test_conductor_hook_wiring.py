@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -506,8 +507,19 @@ def worker_layout(td: str, *, ship_hooks: bool = True) -> tuple[pathlib.Path, pa
         (root / name / ".git").mkdir(parents=True)
     hub = root / WORKER_REPOS[0]
     if ship_hooks:
-        (hub / ".claude" / "hooks").mkdir(parents=True)
-        behaving_guard(hub / ".claude" / "hooks" / "guard_bash.py")
+        hooks = hub / ".claude" / "hooks"
+        hooks.mkdir(parents=True)
+        behaving_guard(hooks / "guard_bash.py")
+        # Every OTHER hook the template names gets an inert stub, so this fake
+        # clone can stand in as a `--hub-clone` and a render resolves fully.
+        # Derived from the template rather than hard-coded: if the template
+        # gains a hook, the fixture grows one too, instead of the render
+        # silently reporting a missing path that has nothing to do with the
+        # layout under test.
+        for name in sorted(set(re.findall(r"/([A-Za-z_]+\.py)", TEMPLATE.read_text(encoding="utf-8")))):
+            target = hooks / name
+            if not target.exists():
+                target.write_text("import sys; sys.exit(0)\n", encoding="utf-8")
         write_settings(
             hub,
             guard_config("$CLAUDE_PROJECT_DIR/.claude/hooks/guard_bash.py"),
@@ -558,10 +570,19 @@ def test_rendering_into_the_worker_session_root_wires_it():
     for the Conductor's single-workspace one."""
     with tempfile.TemporaryDirectory() as td:
         root, hub = worker_layout(td)
-        proc = run("--render", "--workspace", str(root), "--hub-clone", str(REPO_ROOT))
+        # `--hub-clone` is the fixture's own clone, not REPO_ROOT: pointing at the
+        # real checkout would make this test depend on the repo's live
+        # `.claude/hooks/` and pass or fail for reasons unrelated to the five-repo
+        # layout it is named for. The real template against the real hooks is
+        # already covered by `test_the_rendered_template_is_wired`.
+        proc = run("--render", "--workspace", str(root), "--hub-clone", str(hub))
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "HOOKS: wired" in proc.stdout, proc.stdout
         assert (root / ".claude" / "settings.json").is_file()
+        # The rendered config must point into the fixture's clone -- if it still
+        # named REPO_ROOT the assertions above would pass while proving nothing
+        # about this layout.
+        assert str(hub) in (root / ".claude" / "settings.json").read_text(encoding="utf-8")
         # And the five sibling clones are untouched -- the fix belongs to the
         # session root, never to a repo checkout that a PR would then carry.
         assert not (hub / ".claude" / "settings.local.json").exists()

@@ -107,14 +107,27 @@ Exit 0 wired, 1 not-or-unknown, 2 usage. The line prints in **all** directions o
 verifier that only speaks up on failure leaves "guarded" and "the check never ran" identical in the
 record, which is L218 one level up.
 
-### Always pass `--workspace`, and pass the session's root (#1237)
+### Pass `--workspace` only when you know the root — otherwise run bare (#1237)
 
-`--workspace` defaults to `$CLAUDE_PROJECT_DIR` and then to the cwd, and **only the first two are
-statements**. The cwd is a guess, and one particular guess always passes: a clone that ships the
-`.claude/hooks/` being probed satisfies every check above by construction. Run with no arguments
-from inside the hub clone, this script printed `HOOKS: wired … exit 0` inside the five-repo worker
-session, which loads nothing whatsoever. The guard it found was real and the probe honestly passed —
-against a tree that was not the session.
+There are three provenances, and **only two of them are statements**: an explicit `--workspace`, and
+`$CLAUDE_PROJECT_DIR`, which the session itself sets. The third — the cwd fallback, used when
+neither is present — is a guess.
+
+One particular guess always passes: a clone that ships the `.claude/hooks/` being probed satisfies
+every check above by construction. Run with no arguments from inside the hub clone, this script
+printed `HOOKS: wired … exit 0` inside the five-repo worker session, which loads nothing whatsoever.
+The guard it found was real and the probe honestly passed — against a tree that was not the session.
+
+**So the safe default is the bare invocation, not a flag.** Bare already prefers
+`$CLAUDE_PROJECT_DIR` when the session exports it, and refuses rather than certifying when it must
+guess. Supplying `--workspace "$PWD"` looks more careful and is strictly worse — it promotes the
+guess to a statement and restores the false green. The Conductor's bootstrap line above is the one
+place `$PWD` is correct, and only because that session's cwd _is_ its project root.
+
+This heading previously read _"Always pass `--workspace`"_, which is how the `$PWD` foot-gun got
+into `AGENTS.md` in the first place. Ledger **L261**: the operation to watch for is anything that
+promotes a guess to a statement — a default, a shell fallback, an empty value, or a line of
+documentation recommending a flag.
 
 `--workspace ""` is refused as a **usage error** (exit 2) rather than honoured, because
 `Path("").resolve()` is the cwd — an empty value is the inferred fallback wearing the explicit
