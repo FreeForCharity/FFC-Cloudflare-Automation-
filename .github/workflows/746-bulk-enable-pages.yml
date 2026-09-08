@@ -299,6 +299,9 @@ jobs:
               fi
             else
               pages_status="❌ could not read Pages state (not a 404 -- see run log)"
+              # Copilot review (#1252): "see run log" was a lie until this line --
+              # the captured body was never actually emitted anywhere.
+              echo "::warning::Could not read Pages state for FFC-EX-$d: $pages_resp"
               fail_count=$((fail_count + 1))
               pages_ok=0
             fi

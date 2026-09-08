@@ -280,6 +280,10 @@ def test_genuine_pages_get_failure_never_attempts_a_write():
     # unconfirmed, even though TEST_PAGES_POST_FAIL alone would have let a
     # dispatch attempt succeed.
     assert "skipped (Pages not confirmed" in summary, summary
+    # Copilot review (round 4, #1252): the summary says "see run log" -- the
+    # captured error body must actually be there for that to be true.
+    assert "Could not read Pages state" in proc.stdout, proc.stdout
+    assert "Resource not accessible" in proc.stdout, proc.stdout
     assert "dispatched" not in summary, summary
 
 
