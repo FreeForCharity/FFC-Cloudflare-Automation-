@@ -843,6 +843,20 @@ async function main() {
       await tab.evaluate(() => window.scrollTo(0, 0));
       await tab.waitForTimeout(800);
 
+      // Scrolling to the footer puts every next/link in it in the viewport,
+      // and Next.js prefetches those routes' RSC payload in the background —
+      // almost always including "/", since a footer that links home is the
+      // common case. `ctx.close()` below tears down the context's network
+      // stack immediately, which cancels ANYTHING still in flight; a
+      // same-origin prefetch caught mid-request then reports as
+      // `net::ERR_ABORTED` on the bare origin root, indistinguishable from a
+      // genuinely missing asset. These are local static files served over
+      // loopback with no real network latency, so a bounded wait for the
+      // page to go quiet lets a legitimate prefetch actually finish (and a
+      // truly missing asset still fails, just on its own HTTP status rather
+      // than on our teardown timing).
+      await tab.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+
       if (shots) {
         const name = path === '/' ? 'home' : path.replace(/^\/|\/$/g, '').replace(/\//g, '_');
         await tab.screenshot({ path: join(shots, `${name}.png`) });
