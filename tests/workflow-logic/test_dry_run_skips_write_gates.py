@@ -202,6 +202,11 @@ KNOWN_UNGUARDED = {
     # test_a_skipped_job_has_a_real_rehearsal_counterpart either. Move both
     # once #848 makes github-prod-read's credential usable.
     ("732-bulk-create-repos.yml", "create-repos"),
+    # 746 is 732's own follow-up (enable Pages on an already-existing repo) and
+    # shares the identical shape: its preflight only checks repo/deploy.yml
+    # existence, never rehearses the Pages-enable/dispatch calls themselves, so
+    # there is no qualifying rehearsal counterpart either. Same #848 remedy.
+    ("746-bulk-enable-pages.yml", "enable-pages"),
     # REHEARSAL-INSIDE: the dry run is the preview that the LIVE run's preflight
     # requires as evidence within 48h. Skipping it defeats the control.
     ("736-repo-archive.yml", "archive"),

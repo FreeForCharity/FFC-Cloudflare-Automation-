@@ -2188,6 +2188,26 @@
       "categoryCode": "GH"
     },
     {
+      "number": 746,
+      "title": "Repo - Bulk Enable GitHub Pages",
+      "apis": [
+        "Repo"
+      ],
+      "file": "746-bulk-enable-pages.yml",
+      "triggers": [
+        "workflow_dispatch"
+      ],
+      "environments": [
+        "github-prod"
+      ],
+      "description": "732 can create a stub FFC-EX-<domain> repo without GitHub Pages turned on (EnablePages defaults false there, and re-dispatching 732 for an EXISTING repo just gets skipped by its own preflight \u2014 it has no \"fix up an existing repo\" path). This workflow is that follow-up: for each domain, enable Pages on the GitHub-default URL (build_type=workflow, no CNAME, never touches DNS) and dispatch the repo's own deploy.yml so the site actually builds and serves 200.  Why a manual dispatch of deploy.yml is required at all: a repo created via `gh repo create --template` does not fire a push event, so deploy.yml's `workflow_run` trigger (which waits on CI - Build and Test) never fires on its own \u2014 its `workflow_dispatch` trigger is the only way in until a real commit lands.",
+      "safetyLevel": "Writes (gated)",
+      "approvalEnv": "\u2705 github-prod",
+      "guard": "dispatch-only follow-up to 732: enables Pages (build_type=workflow, GitHub-default URL only, no CNAME/DNS) and dispatches deploy.yml on EXISTING FFC-EX-\\<domain\\> repos under ONE approval; 732 can only set Pages at creation time and its own preflight skips a domain whose repo already exists, so this is the only automated path to turn Pages on afterward; ungated preflight skips a domain with no matching repo or no deploy.yml on the default branch, without failing the rest of the batch; idempotent Pages-enable (GET before POST, never touches an already-configured \u2014 possibly custom-domain \u2014 repo); `dry_run` default true",
+      "category": "GitHub (Website + Repo)",
+      "categoryCode": "GH"
+    },
+    {
       "number": 801,
       "title": "Candid - Charity Check (EIN)",
       "apis": [
