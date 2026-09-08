@@ -104,12 +104,22 @@ jobs:
           for d in "${domains[@]}"; do
             name="FFC-EX-$d"
 
+            # Same "HTTP 404 = genuinely not found, anything else = could not
+            # verify" distinction as the enable-pages job's own Pages GET below
+            # (and 732's preflight before it) -- a 403/5xx here is not "no repo",
+            # it is "the check itself failed", and must be reported as such
+            # rather than folded into the same "not found" verdict (Copilot
+            # review, #1252).
             set +e
             resp=$(gh api "repos/$owner/$name" 2>&1)
             rc=$?
             set -e
             if [ $rc -ne 0 ]; then
-              echo "| $d | $name | — | — | ⛔ repo not found |" >> "$GITHUB_STEP_SUMMARY"
+              if printf '%s' "$resp" | grep -q "HTTP 404"; then
+                echo "| $d | $name | — | — | ⛔ repo not found |" >> "$GITHUB_STEP_SUMMARY"
+              else
+                echo "| $d | $name | — | — | ⛔ could not verify repo (transient API error) |" >> "$GITHUB_STEP_SUMMARY"
+              fi
               skipped=$((skipped + 1))
               continue
             fi
@@ -124,7 +134,11 @@ jobs:
             wfrc=$?
             set -e
             if [ $wfrc -ne 0 ]; then
-              echo "| $d | $name | $branch | ⛔ missing | ⛔ no deploy.yml on default branch |" >> "$GITHUB_STEP_SUMMARY"
+              if printf '%s' "$wf" | grep -q "HTTP 404"; then
+                echo "| $d | $name | $branch | ⛔ missing | ⛔ no deploy.yml on default branch |" >> "$GITHUB_STEP_SUMMARY"
+              else
+                echo "| $d | $name | $branch | ⛔ unverified | ⛔ could not verify deploy.yml (transient API error) |" >> "$GITHUB_STEP_SUMMARY"
+              fi
               skipped=$((skipped + 1))
               continue
             fi
@@ -257,13 +271,20 @@ jobs:
                 pages_status="[DRY RUN] would enable (build_type=workflow)"
               else
                 set +e
-                gh api -X POST "repos/$full/pages" -F "build_type=workflow" >/dev/null 2>&1
+                post_resp=$(gh api -X POST "repos/$full/pages" -F "build_type=workflow" 2>&1)
                 prc=$?
                 set -e
                 if [ $prc -eq 0 ]; then
                   pages_status="enabled (build_type=workflow)"
                 else
-                  pages_status="❌ enable failed"
+                  # Copilot review (#1252): don't discard the error body -- a
+                  # truncated, pipe-stripped one-liner in the summary plus the
+                  # full text on the job log is enough to diagnose without
+                  # risking a secret (this call carries none) or breaking the
+                  # markdown table.
+                  detail=$(printf '%s' "$post_resp" | tr '\n' ' ' | tr -d '|' | cut -c1-200)
+                  pages_status="❌ enable failed: $detail"
+                  echo "::warning::Pages enable failed for FFC-EX-$d: $post_resp"
                   fail_count=$((fail_count + 1))
                 fi
               fi
@@ -276,13 +297,15 @@ jobs:
               deploy_status="[DRY RUN] would dispatch deploy.yml on $branch"
             else
               set +e
-              gh api -X POST "repos/$full/actions/workflows/deploy.yml/dispatches" -F "ref=$branch" >/dev/null 2>&1
+              dispatch_resp=$(gh api -X POST "repos/$full/actions/workflows/deploy.yml/dispatches" -F "ref=$branch" 2>&1)
               drc=$?
               set -e
               if [ $drc -eq 0 ]; then
                 deploy_status="dispatched ($branch)"
               else
-                deploy_status="❌ dispatch failed"
+                detail=$(printf '%s' "$dispatch_resp" | tr '\n' ' ' | tr -d '|' | cut -c1-200)
+                deploy_status="❌ dispatch failed: $detail"
+                echo "::warning::deploy.yml dispatch failed for FFC-EX-$d: $dispatch_resp"
                 fail_count=$((fail_count + 1))
               fi
             fi

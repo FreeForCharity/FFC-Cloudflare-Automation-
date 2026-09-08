@@ -163,6 +163,36 @@ def test_repo_without_deploy_yml_is_skipped_not_fatal():
     assert "no deploy.yml" in summary, summary
 
 
+def test_transient_repo_check_failure_is_skipped_not_conflated_with_missing():
+    # Copilot review (#1252): a 403/5xx on the repo-existence GET is not "not
+    # found" -- it means the check itself could not run, and the summary must
+    # say so distinctly (same 404-vs-genuine-error split as the enable step).
+    proc, summary, out = run_preflight(
+        {
+            "IN_DOMAINS": "one.org",
+            "TEST_REPO_META": "error",
+        }
+    )
+    assert proc.returncode != 0, proc.stdout
+    assert out.get("ready_domains") == "[]", out
+    assert "could not verify repo" in summary, summary
+    assert "repo not found" not in summary, summary
+
+
+def test_transient_deploy_yml_check_failure_is_skipped_not_conflated_with_missing():
+    proc, summary, out = run_preflight(
+        {
+            "IN_DOMAINS": "one.org",
+            "TEST_REPO_META": '{"full_name": "FreeForCharity/FFC-EX-one.org"}',
+            "TEST_DEPLOY_YML_CHECK_FAIL": "1",
+        }
+    )
+    assert proc.returncode != 0, proc.stdout
+    assert out.get("ready_domains") == "[]", out
+    assert "could not verify deploy.yml" in summary, summary
+    assert "no deploy.yml on default branch" not in summary, summary
+
+
 def test_non_default_branch_is_captured_and_reported():
     proc, summary, out = run_preflight(
         {
@@ -245,7 +275,9 @@ def test_genuine_pages_get_failure_never_attempts_a_write():
     assert "operation(s) failed" in proc.stdout, proc.stdout
 
 
-def test_pages_post_failure_fails_the_step():
+def test_pages_post_failure_fails_the_step_and_captures_the_error_detail():
+    # Copilot review (#1252): the POST's error body was previously discarded
+    # (>/dev/null 2>&1) -- it must now show up (truncated) in the summary.
     proc, summary = run_enable(
         {
             "IN_DRY_RUN": "false",
@@ -255,10 +287,11 @@ def test_pages_post_failure_fails_the_step():
     )
     assert proc.returncode != 0, proc.stdout
     assert "enable failed" in summary, summary
+    assert "Validation Failed" in summary, summary
     assert "operation(s) failed" in proc.stdout, proc.stdout
 
 
-def test_dispatch_failure_fails_the_step():
+def test_dispatch_failure_fails_the_step_and_captures_the_error_detail():
     proc, summary = run_enable(
         {
             "IN_DRY_RUN": "false",
@@ -267,6 +300,7 @@ def test_dispatch_failure_fails_the_step():
     )
     assert proc.returncode != 0, proc.stdout
     assert "dispatch failed" in summary, summary
+    assert "Not Found" in summary, summary
     assert "operation(s) failed" in proc.stdout, proc.stdout
 
 

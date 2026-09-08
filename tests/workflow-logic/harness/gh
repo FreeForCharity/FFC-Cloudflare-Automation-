@@ -70,6 +70,13 @@ case "$cmd" in
           echo "Not Found (HTTP 404)" >&2
           exit 1
         fi
+        # A genuine (non-404) failure on THIS call specifically, distinct from
+        # TEST_DEPLOY_YML_MISSING above -- lets a scenario prove preflight
+        # reports "could not verify" rather than folding it into "missing".
+        if [ "${TEST_DEPLOY_YML_CHECK_FAIL:-}" = "1" ]; then
+          echo '{"message":"Resource not accessible by personal access token","status":"403"}'
+          exit 1
+        fi
         ;;
       orgs/*/repos\?* | orgs/*/repos\ * | orgs/*/repos)
         # Org repo LISTING for the preflight sibling scans (one name per line).
@@ -203,10 +210,17 @@ case "$cmd" in
         fi
         ;;&
       *repos/*)
-        # 736 archive GET: TEST_REPO_META is a JSON blob ("404" = not found).
+        # 736 archive GET: TEST_REPO_META is a JSON blob ("404" = not found,
+        # "error" = a genuine non-404 failure -- 746 preflight distinguishes
+        # the two; other callers of this fixture only ever set "404" or a
+        # blob, so "error" is a safe new sentinel).
         if [ -n "${TEST_REPO_META:-}" ]; then
           if [ "$TEST_REPO_META" = "404" ]; then
             echo "Not Found (HTTP 404)" >&2
+            exit 1
+          fi
+          if [ "$TEST_REPO_META" = "error" ]; then
+            echo '{"message":"Resource not accessible by personal access token","status":"403"}'
             exit 1
           fi
           printf '%s\n' "$TEST_REPO_META"
