@@ -623,14 +623,98 @@ def test_a_lone_clone_with_no_siblings_names_no_session_root():
         assert report["candidate_session_root"] is None, report
 
 
-def test_a_parent_that_already_has_its_own_claude_is_not_offered_as_the_session_root():
-    """Pointing at a parent that already carries `.claude` is advice to clobber it."""
+def test_a_parent_that_already_has_its_own_claude_is_still_named():
+    """An already-configured parent is the MOST likely session root, not the least.
+
+    An earlier draft excluded it, reasoning that naming it was advice to clobber
+    a config. That is true of a `--render` suggestion and this hint does not feed
+    one -- the refusal's remedy is a read-only re-measure. The exclusion was
+    measured degrading the message on a real box: once `/home/user/.claude`
+    existed, the remedy fell back to a `<session project root>` placeholder at
+    exactly the moment it could have named the answer.
+    """
     with tempfile.TemporaryDirectory() as td:
         root, hub = worker_layout(td)
         (root / ".claude").mkdir()
         proc = run("--json", cwd=str(hub))
         report = json.loads(proc.stdout)
-        assert report["candidate_session_root"] is None, report
+        assert report["candidate_session_root"] == str(root), report
+
+
+# --------------------------------------------------------------------------
+# Review round 1 (Copilot on #1253). Four findings, all real; these pin them.
+# --------------------------------------------------------------------------
+
+
+def test_an_empty_workspace_is_a_usage_error_not_an_explicit_statement():
+    """`--workspace ""` reproduced the #1237 false green through the fix's own flag.
+
+    `Path("").resolve()` is the cwd, so an empty value is the inferred fallback
+    wearing the explicit flag's clothes: it scored as `explicit`, skipped the
+    self-certification refusal, and printed `HOOKS: wired ... exit 0` from inside
+    a hook-shipping clone. Measured before the guard existed.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        _, hub = worker_layout(td)
+        for value in ("", "   "):
+            proc = run("--workspace", value, cwd=str(hub))
+            assert proc.returncode == 2, (value, proc.stdout, proc.stderr)
+            assert "HOOKS: wired" not in proc.stdout, (value, proc.stdout)
+            assert "--workspace was empty" in proc.stderr, (value, proc.stderr)
+
+
+def test_an_unknown_workspace_source_raises_rather_than_certifying():
+    """A free-form string gating a safeguard fails OPEN on a typo.
+
+    `"inferrred"` compares unequal to `SOURCE_INFERRED`, which would skip the
+    refusal and certify the exact case this exists to catch. Raising is the
+    fail-closed choice: an unknown provenance is not a provenance.
+    """
+    vch = _vch()
+    assert vch.SOURCES == frozenset({"explicit", "env", "inferred"}), vch.SOURCES
+    with tempfile.TemporaryDirectory() as td:
+        _, hub = worker_layout(td)
+        try:
+            vch.verify(pathlib.Path(hub), "inferrred")
+        except ValueError as exc:
+            assert "inferrred" in str(exc), exc
+        else:
+            raise AssertionError("a typo'd source was accepted and the safeguard skipped")
+
+
+def test_the_self_certifying_refusal_is_the_only_thing_that_costs_a_parent_scan():
+    """The sibling hint is computed lazily: `null` means "no hint was needed".
+
+    Every non-refusal run would otherwise pay a directory scan of the parent for
+    a string nobody prints.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        _, hub = worker_layout(td)
+        stated = json.loads(run("--json", "--workspace", str(hub)).stdout)
+        assert stated["wired"] is True, stated
+        assert stated["candidate_session_root"] is None, stated
+        inferred = json.loads(run("--json", cwd=str(hub)).stdout)
+        assert inferred["self_certifying"] is True, inferred
+        assert inferred["candidate_session_root"] is not None, inferred
+
+
+def test_the_printed_remedy_quotes_paths_that_contain_spaces():
+    """The remedy is printed to be pasted, and both hosts have spaces in paths.
+
+    Unquoted, `--workspace C:/My Workspace` arrives as two arguments and the
+    remedy fails in a way that reads as the script being broken.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        spaced = pathlib.Path(td) / "My Workspace"
+        spaced.mkdir()
+        proc = run("--workspace", str(spaced))
+        assert proc.returncode == 1, proc.stdout
+        assert "NOT WIRED" in proc.stdout, proc.stdout
+        remedy = [ln for ln in proc.stdout.splitlines() if "--render" in ln]
+        assert remedy, proc.stdout
+        # shlex.quote wraps a spaced path in single quotes; the bare form would
+        # split on the space and silently target `My`.
+        assert f"--workspace '{spaced}'" in remedy[0], remedy[0]
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

@@ -111,6 +111,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import subprocess
 import sys
 
@@ -120,6 +121,15 @@ PLACEHOLDER = "__HUB_CLONE__"
 
 # Claude Code reads both, `settings.local.json` last (it overrides).
 SETTINGS_NAMES = ("settings.json", "settings.local.json")
+
+# How the workspace under test was chosen. Only the last is a guess, and only the
+# last can be refused as self-certifying (#1237). Named constants rather than bare
+# strings because these gate a safeguard: a typo'd literal at the comparison site
+# reads as "not inferred" and silently restores the false green.
+SOURCE_EXPLICIT = "explicit"  # --workspace was given
+SOURCE_ENV = "env"  # $CLAUDE_PROJECT_DIR, which the SESSION sets
+SOURCE_INFERRED = "inferred"  # the cwd fallback -- a guess
+SOURCES = frozenset({SOURCE_EXPLICIT, SOURCE_ENV, SOURCE_INFERRED})
 
 # One command that MUST be refused and one that MUST be permitted. The blocking
 # case is L50 -- the exact shape that went unguarded in run 134 and produced
@@ -208,20 +218,25 @@ def sibling_clones(workspace: pathlib.Path) -> list[str]:
 def candidate_session_root(workspace: pathlib.Path) -> str | None:
     """The directory a multi-repo worker's project root probably is, or None.
 
-    Deliberately conservative: it fires only on the shape #1237 measured -- two or
-    more sibling checkouts under a parent that carries no `.claude` of its own. A
-    parent that already has `.claude` is not a missing-config story, and pointing
-    at it would be advice to overwrite something.
+    Fires on the shape #1237 measured: two or more sibling checkouts under a
+    common parent. One checkout says nothing about where a session is rooted, so
+    a lone clone yields None rather than a guess -- a wrong hint is worse than no
+    hint, because it sends the reader to re-measure the wrong directory and get a
+    confident answer about it.
+
+    A parent that already carries `.claude` is still named, and an earlier draft
+    of this had it backwards. That draft excluded such parents on the grounds that
+    naming one was "advice to overwrite something" -- true of a `--render`
+    suggestion, and this hint no longer feeds one. The refusal's remedy is a
+    read-only re-measure (`--workspace <root>`), for which an already-configured
+    parent is the *most* likely session root, not a directory to steer away from.
+    Measured on this box: once `/home/user/.claude` existed, the exclusion made
+    the remedy degrade to a `<session project root>` placeholder at exactly the
+    moment it could have named the answer.
     """
     if len(sibling_clones(workspace)) < 2:
         return None
-    parent = workspace.parent
-    try:
-        if (parent / ".claude").is_dir():
-            return None
-    except OSError:
-        return None
-    return str(parent)
+    return str(workspace.parent)
 
 
 def _expand(raw: str, workspace: pathlib.Path) -> str:
@@ -343,19 +358,32 @@ def probe_guard(guard: pathlib.Path) -> list[dict]:
     return results
 
 
-def verify(workspace: pathlib.Path, source: str = "explicit") -> dict:
+def verify(workspace: pathlib.Path, source: str = SOURCE_EXPLICIT) -> dict:
     """Report on `workspace`. `source` says how that path was chosen (#1237).
 
     `source` is a parameter and not a read of `sys.argv` because it changes the
     VERDICT, not just the wording: an inferred workspace that ships the hooks
     under test cannot be certified. Passing it in keeps both branches reachable
     from a test without reconstructing a command line.
+
+    It is validated rather than trusted. A free-form string that gates a
+    safeguard fails open on a typo -- `"inferrred"` would compare unequal to
+    `SOURCE_INFERRED`, skip the refusal, and certify the very case this exists to
+    catch, silently and in the reassuring direction. Raising is the fail-closed
+    choice: an unknown provenance is not a provenance.
     """
+    if source not in SOURCES:
+        raise ValueError(f"unknown workspace source {source!r}; expected one of {sorted(SOURCES)}")
+
     report: dict = {
         "workspace": str(workspace),
         "workspace_source": source,
         "self_certifying": False,
-        "candidate_session_root": candidate_session_root(workspace),
+        # Filled in only on the refusal path below. It exists to make that one
+        # message actionable, and computing it eagerly would charge every run a
+        # directory scan of the parent for a hint nobody reads -- so `null` here
+        # means "no hint was needed", not "no sibling clones exist".
+        "candidate_session_root": None,
         "settings_files": [],
         "hooks_carriers": [],
         "missing_paths": [],
@@ -367,9 +395,10 @@ def verify(workspace: pathlib.Path, source: str = "explicit") -> dict:
     # Checked BEFORE reading any settings: the whole point is that the checks
     # below would all pass. Running them first and then withholding the verdict
     # would print a report indistinguishable from a real pass to anyone skimming.
-    if source == "inferred" and ships_hooks(workspace):
+    if source == SOURCE_INFERRED and ships_hooks(workspace):
         report["self_certifying"] = True
-        hint = report["candidate_session_root"]
+        hint = candidate_session_root(workspace)
+        report["candidate_session_root"] = hint
         report["problems"].append(
             f"workspace was inferred from the current directory ({workspace}), and that "
             "directory ships the very `.claude/hooks/` this check would probe -- so it "
@@ -535,11 +564,27 @@ def main(argv: list[str] | None = None) -> int:
     # set BY the session, so it is a statement of the real project root and ranks
     # with an explicit flag; the cwd is wherever the operator happened to `cd`.
     if args.workspace is not None:
-        raw_workspace, source = args.workspace, "explicit"
+        # An empty or whitespace `--workspace ""` is refused rather than accepted
+        # as a statement. `Path("").resolve()` is the CWD, so the empty string is
+        # the cwd fallback wearing the explicit flag's clothes -- it would score
+        # as `explicit`, skip the self-certification refusal, and reproduce the
+        # #1237 false green through this very fix's own escape hatch. Measured
+        # before this guard existed: `--workspace ""` from inside the hub clone
+        # printed `HOOKS: wired ... exit 0`. Usage error, not a verdict: nobody
+        # means "the empty path", so there is no honest reading to fall back to.
+        if not args.workspace.strip():
+            print(
+                "error: --workspace was empty; pass the session's project root "
+                "(an empty value resolves to the current directory, which is the "
+                "guess this flag exists to replace)",
+                file=sys.stderr,
+            )
+            return 2
+        raw_workspace, source = args.workspace, SOURCE_EXPLICIT
     elif os.environ.get("CLAUDE_PROJECT_DIR"):
-        raw_workspace, source = os.environ["CLAUDE_PROJECT_DIR"], "env"
+        raw_workspace, source = os.environ["CLAUDE_PROJECT_DIR"], SOURCE_ENV
     else:
-        raw_workspace, source = ".", "inferred"
+        raw_workspace, source = ".", SOURCE_INFERRED
 
     workspace = pathlib.Path(from_msys_path(raw_workspace)).expanduser().resolve()
     hub_clone = pathlib.Path(from_msys_path(args.hub_clone)).expanduser().resolve()
@@ -562,7 +607,14 @@ def main(argv: list[str] | None = None) -> int:
 
     print(start_line(report))
     if not report["wired"]:
-        script = REPO_ROOT / "scripts" / "verify-conductor-hooks.py"
+        # Quoted, because these are printed to be pasted and the two hosts that
+        # run this both have spaces in the relevant paths: the Conductor's clone
+        # sits under `C:\Program Files\Git`-adjacent trees and its workspace path
+        # is operator-chosen. Unquoted, `--workspace C:/My Workspace` arrives as
+        # two arguments and the remedy fails in a way that reads as the script
+        # being wrong. shlex is POSIX quoting, which is correct here: the
+        # Conductor's shell is git-bash, not cmd.
+        script = shlex.quote(str(REPO_ROOT / "scripts" / "verify-conductor-hooks.py"))
         print()
         print("Remedy:")
         if report.get("self_certifying"):
@@ -570,12 +622,18 @@ def main(argv: list[str] | None = None) -> int:
             # one directory we have just established says nothing about the session,
             # and rendering into it would overwrite the hub's own tracked settings.
             # Re-measure against the real root first; the answer may be "wired".
-            target = report.get("candidate_session_root") or "<session project root>"
+            hint = report.get("candidate_session_root")
+            # The placeholder stays unquoted: it is a prompt to the reader, and
+            # `'<session project root>'` would look like a path to paste verbatim.
+            target = shlex.quote(hint) if hint else "<session project root>"
             print(f"  python3 {script} --workspace {target}")
             print("  # state the root instead of inferring it, then render only if that says NOT WIRED")
         else:
             print(f"  python3 {script} \\")
-            print(f"    --render --workspace {workspace} --hub-clone {hub_clone}")
+            print(
+                f"    --render --workspace {shlex.quote(str(workspace))} "
+                f"--hub-clone {shlex.quote(str(hub_clone))}"
+            )
         print("  (docs/runbooks/conductor-hook-wiring.md explains why the copy is a build product)")
     return 0 if report["wired"] else 1
 

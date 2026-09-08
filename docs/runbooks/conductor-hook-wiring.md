@@ -116,6 +116,11 @@ from inside the hub clone, this script printed `HOOKS: wired … exit 0` inside 
 session, which loads nothing whatsoever. The guard it found was real and the probe honestly passed —
 against a tree that was not the session.
 
+`--workspace ""` is refused as a **usage error** (exit 2) rather than honoured, because
+`Path("").resolve()` is the cwd — an empty value is the inferred fallback wearing the explicit
+flag's clothes, and it reproduced the false green through this very fix's own escape hatch. Caught
+in review on #1253.
+
 That case is now refused: an **inferred** workspace that ships hooks reports `HOOKS: UNVERIFIED`,
 exit 1, and names the sibling-clone parent it believes the real session root to be, so the remedy is
 one paste away. Stating the workspace — or having the session export `CLAUDE_PROJECT_DIR` — restores
