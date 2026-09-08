@@ -7,8 +7,7 @@ run-name: 'Bulk enable Pages (dry_run=${{ inputs.DryRun }})'
 # path). This workflow is that follow-up: for each domain, enable Pages on the
 # GitHub-default URL (build_type=workflow, no CNAME, never touches DNS) and
 # dispatch the repo's own deploy.yml so the site actually builds and serves 200.
-#
-# Why a manual dispatch of deploy.yml is required at all: a repo created via
+# A manual dispatch of deploy.yml is required at all because a repo created via
 # `gh repo create --template` does not fire a push event, so deploy.yml's
 # `workflow_run` trigger (which waits on CI - Build and Test) never fires on its
 # own — its `workflow_dispatch` trigger is the only way in until a real commit
@@ -164,6 +163,8 @@ jobs:
             exit 1
           fi
 
+          echo "::notice::Caveat carried from 732: this preflight sees repos visible to the ambient GITHUB_TOKEN (public repos + this repo) only — a PRIVATE FFC-EX-<domain> repo reads as 'not found' here even if it exists, and is skipped rather than reaching the gated job (Copilot review, #1252)."
+
   enable-pages:
     needs: preflight
     # Job-level block: the ungated preflight job keeps the repo default token.
@@ -264,6 +265,13 @@ jobs:
             pages_rc=$?
             set -e
 
+            # Whether it is safe to dispatch a deploy for this domain at all --
+            # cleared on any Pages failure below so a deploy is never fired
+            # against a repo whose Pages state is unknown or unconfigured
+            # (Copilot review, #1252): a "deploy" with Pages still off, or with
+            # Pages in an unverified state, is a confusing, wasted write.
+            pages_ok=1
+
             if [ $pages_rc -eq 0 ]; then
               pages_status="already enabled"
             elif printf '%s' "$pages_resp" | grep -q "HTTP 404"; then
@@ -286,14 +294,18 @@ jobs:
                   pages_status="❌ enable failed: $detail"
                   echo "::warning::Pages enable failed for FFC-EX-$d: $post_resp"
                   fail_count=$((fail_count + 1))
+                  pages_ok=0
                 fi
               fi
             else
               pages_status="❌ could not read Pages state (not a 404 -- see run log)"
               fail_count=$((fail_count + 1))
+              pages_ok=0
             fi
 
-            if [ "${IN_DRY_RUN:-true}" = "true" ]; then
+            if [ "$pages_ok" != "1" ]; then
+              deploy_status="⏭ skipped (Pages not confirmed -- see Pages column)"
+            elif [ "${IN_DRY_RUN:-true}" = "true" ]; then
               deploy_status="[DRY RUN] would dispatch deploy.yml on $branch"
             else
               set +e

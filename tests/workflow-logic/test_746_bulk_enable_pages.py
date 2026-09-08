@@ -136,7 +136,10 @@ def test_empty_domains_input_fails():
     assert "No usable domains parsed" in proc.stdout, proc.stdout
 
 
-def test_missing_repo_is_skipped_not_fatal():
+def test_missing_repo_is_skipped_and_all_skipped_fails_closed():
+    # Named for what actually happens: an individual missing-repo domain is
+    # merely skipped, but when it is the ONLY domain, "0 ready" trips the
+    # batch-level fail-closed exit (Copilot review, #1252).
     proc, summary, out = run_preflight(
         {
             "IN_DOMAINS": "one.org,two.org",
@@ -149,7 +152,7 @@ def test_missing_repo_is_skipped_not_fatal():
     assert "repo not found" in summary, summary
 
 
-def test_repo_without_deploy_yml_is_skipped_not_fatal():
+def test_repo_without_deploy_yml_is_skipped_and_all_skipped_fails_closed():
     proc, summary, out = run_preflight(
         {
             "IN_DOMAINS": "one.org,two.org",
@@ -273,6 +276,11 @@ def test_genuine_pages_get_failure_never_attempts_a_write():
     assert "could not read Pages state" in summary, summary
     assert "enable failed" not in summary, summary
     assert "operation(s) failed" in proc.stdout, proc.stdout
+    # Copilot review (#1252): dispatch must not fire when Pages state is
+    # unconfirmed, even though TEST_PAGES_POST_FAIL alone would have let a
+    # dispatch attempt succeed.
+    assert "skipped (Pages not confirmed" in summary, summary
+    assert "dispatched" not in summary, summary
 
 
 def test_pages_post_failure_fails_the_step_and_captures_the_error_detail():
@@ -289,6 +297,9 @@ def test_pages_post_failure_fails_the_step_and_captures_the_error_detail():
     assert "enable failed" in summary, summary
     assert "Validation Failed" in summary, summary
     assert "operation(s) failed" in proc.stdout, proc.stdout
+    # Copilot review (#1252): a failed enable must not still fire a dispatch.
+    assert "skipped (Pages not confirmed" in summary, summary
+    assert "dispatched" not in summary, summary
 
 
 def test_dispatch_failure_fails_the_step_and_captures_the_error_detail():
