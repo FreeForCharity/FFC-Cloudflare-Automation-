@@ -888,7 +888,12 @@ async function main() {
       const url = r.url();
       if (isLegacy(url)) return;
       const failure = r.failure()?.errorText;
-      if (isRouterPrefetchAbort(failure, r.headers())) return;
+      // Same-origin only: the App Router never prefetches a THIRD-PARTY route,
+      // so a cross-origin request carrying a generic Purpose/Sec-Purpose:
+      // prefetch header (browser speculative prefetch, an embed's own <link
+      // rel=prefetch>) is a real third-party outcome and must still be
+      // reported, not excused by a rule written for our own router.
+      if (url.startsWith(origin) && isRouterPrefetchAbort(failure, r.headers())) return;
       const entry = `${url} (${failure})`;
       // Same-origin failures mean the mirror is incomplete. Third-party hosts
       // may simply be unreachable from CI, so those are reported, not fatal.
