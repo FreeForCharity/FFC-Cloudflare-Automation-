@@ -231,20 +231,49 @@ def test_the_ungated_read_lanes_are_still_dispatched():
         )
 
 
-def test_the_reuse_lookup_is_confined_to_the_default_branch():
+def test_every_run_lookup_is_confined_to_the_default_branch():
     """
-    Raised in review on #1255, and a data-integrity finding rather than a nit.
-    An unconstrained `gh run list --status success` spans every branch, so one
-    successful `workflow_dispatch` of 601 from a feature branch becomes the
-    newest success and its membership data is published in the sites list.
+    Raised in review on #1255, twice -- first against the reuse lane, then
+    against the dispatch lane, which had the same defect and was pre-existing.
+    A data-integrity finding rather than a nit: `gh run list` spans every
+    branch, so a `workflow_dispatch` of an export workflow from anyone's
+    feature branch can become the run 703 consumes, and its data is published
+    in the sites list through a run that looks entirely normal.
+
+    Asserted over ALL lookups rather than each by name, because the first fix
+    corrected one of the two and left its sibling six lines away untouched. A
+    guard written per-call-site would have passed on exactly that state.
     """
     body = _export_step_body()
-    lookup = re.search(r"run_id=\$\(gh run list[^)]*--status success[^)]*\)", body, re.S)
-    assert lookup, "the reuse path no longer looks a successful run up with `gh run list`"
-    assert "--branch main" in lookup.group(0), (
-        "the reuse lookup is not confined to the default branch, so a successful "
-        f"dispatch of {WPMUDEV_WF} on ANY branch can become the export the published "
-        f"sites list is built from. Found: {lookup.group(0)}"
+    lookups = re.findall(r"run_id=\$\(gh run list.*?\)\n", body, re.S)
+    assert len(lookups) == 2, (
+        f"expected 703 to look runs up in two places (dispatch lane, reuse lane); "
+        f"found {len(lookups)}. If a lane was added or removed, extend this guard "
+        "rather than deleting it."
+    )
+    unconfined = [lk for lk in lookups if "--branch main" not in lk]
+    assert not unconfined, (
+        "a `gh run list` lookup in 703 is not confined to the default branch, so a "
+        "dispatch of that export on ANY branch can become the run the published sites "
+        f"list is built from. Unconfined: {unconfined}"
+    )
+
+
+def test_the_ungated_lanes_are_dispatched_onto_the_default_branch():
+    """
+    The other half of the lookup guard. `gh workflow run` without `--ref`
+    happens to default to the default branch, so the pair worked by luck;
+    stating it makes the lookup's `--branch main` verifiable rather than
+    coincidental.
+    """
+    dispatch_section = _export_step_body().split("download_latest")[0]
+    run_cmds = re.findall(r"gh workflow run.*", dispatch_section)
+    assert run_cmds, "703 dispatches nothing at all any more"
+    missing = [c for c in run_cmds if "--ref main" not in c]
+    assert not missing, (
+        "a dispatch in 703's collection step does not pin `--ref main`, so the run it "
+        "creates may not be the one the `--branch main` lookup below can see. "
+        f"Found: {missing}"
     )
 
 
