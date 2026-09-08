@@ -43,7 +43,12 @@ export default function FfcFooter() {
   const ein = rawEin === TEMPLATE_EIN ? '' : rawEin
   const profileUrl = siteConfig.guidestar?.profileUrl
   const candidUrl = profileUrl === TEMPLATE_GUIDESTAR ? '' : profileUrl
-  const taxStatusLabel = siteConfig.taxStatusLabel?.trim() ?? ''
+  // SiteConfig carries no dedicated tax-status field (checked against both
+  // FFC templates' shared shape). The 501(c)(3) status line is a Level-2
+  // footer-standard item gated on the SAME signal as the EIN/Candid line
+  // above -- a real, non-template EIN -- which is exactly the skill's own
+  // Level 1 (no status line, no EIN/Candid link) vs Level 2 (both) split.
+  const taxStatusLabel = ein ? 'a US 501(c)(3) Non-Profit' : ''
   const policyLinks = [
     { name: 'Privacy Policy', href: '/privacy-policy' },
     { name: 'Cookie Policy', href: '/cookie-policy' },
