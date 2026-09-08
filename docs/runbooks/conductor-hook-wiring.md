@@ -92,6 +92,13 @@ python3 repos/FFC-Cloudflare-Automation/scripts/verify-conductor-hooks.py \
   --workspace "$PWD"
 ```
 
+⚠️ **Do not copy that `$PWD` form into any other session.** It is correct _here and only here_,
+because the Conductor's bootstrap runs from its workspace, so its cwd genuinely **is** its project
+root. Anywhere else — a worker whose cwd is a clone, most of all — `$PWD` promotes a guess to a
+statement and reports `HOOKS: wired` for a tree that is not the session. That is exactly how the
+foot-gun reached `AGENTS.md` (see the section below); a reader who scrolls to the nearest snippet
+and copies it is the case this note exists for. Elsewhere, run the verifier **bare**.
+
 `$PWD` is git-bash's MSYS spelling (`/c/...`), and that is accepted: the script maps a `/<drive>/`
 prefix to `C:/` on Windows before building any `Path`. It has to — native Windows Python treats a
 leading `/c/` as drive-relative and resolves it to `C:\c\...`, which would report a correctly-wired

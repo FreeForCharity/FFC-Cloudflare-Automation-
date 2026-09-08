@@ -633,6 +633,43 @@ def test_an_inferred_workspace_that_ships_no_hooks_is_still_measured():
         assert "HOOKS: wired" in proc.stdout, proc.stdout
 
 
+def test_an_empty_hooks_dir_gets_the_missing_path_diagnostics_not_the_refusal():
+    """An empty `.claude/hooks/` cannot self-certify, so refusing on it is wrong twice.
+
+    The refusal's own wording claims the workspace "ships the very
+    `.claude/hooks/`" under test, which is false for an empty directory; and it
+    replaces the strictly more useful report that names each hook path that did
+    not resolve. Nothing can resolve INTO an empty directory, so there is no
+    false green to prevent here.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        ws = pathlib.Path(td) / "clone"
+        (ws / ".claude" / "hooks").mkdir(parents=True)
+        write_settings(ws, guard_config("$CLAUDE_PROJECT_DIR/.claude/hooks/guard_bash.py"))
+        proc = run(cwd=str(ws))
+        assert proc.returncode == 1, proc.stdout
+        assert "UNVERIFIED" not in proc.stdout, proc.stdout
+        assert "NOT WIRED" in proc.stdout, proc.stdout
+        assert "do not exist" in proc.stdout, proc.stdout
+
+
+def test_one_hook_script_is_enough_to_be_self_certifying():
+    """The other side of that line: a populated dir must still be refused.
+
+    Asserted next to the empty case on purpose -- narrowing a safeguard is only
+    safe if the narrowing is pinned in both directions, or the next edit quietly
+    turns "at least one .py" into "the directory exists" or into nothing at all.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        ws = pathlib.Path(td) / "clone"
+        (ws / ".claude" / "hooks").mkdir(parents=True)
+        behaving_guard(ws / ".claude" / "hooks" / "guard_bash.py")
+        write_settings(ws, guard_config("$CLAUDE_PROJECT_DIR/.claude/hooks/guard_bash.py"))
+        proc = run(cwd=str(ws))
+        assert proc.returncode == 1, proc.stdout
+        assert "UNVERIFIED" in proc.stdout, proc.stdout
+
+
 def test_a_lone_clone_with_no_siblings_names_no_session_root():
     """`candidate_session_root` is a hint, and a wrong hint is worse than none.
 

@@ -184,15 +184,29 @@ _BARE_PY = re.compile(r"""(?:[A-Za-z]:)?[^\s"';|&]+\.py""")
 
 
 def ships_hooks(directory: pathlib.Path) -> bool:
-    """True when `directory` carries the hook scripts a settings block would name.
+    """True when `directory` carries hook SCRIPTS a settings block could resolve to.
 
     This is the self-certification test (#1237). A workspace that ships its own
     `.claude/hooks/` satisfies every path-resolution check no matter what the
     session's real project root is, so inferring such a directory and then
     reporting it wired proves only that the directory exists.
+
+    The presence of at least one `.py` is the condition, not the presence of the
+    directory. An EMPTY `.claude/hooks/` cannot certify anything -- nothing
+    resolves to it -- so refusing on it was both inaccurate (the refusal says the
+    workspace "ships the very `.claude/hooks/`" under test) and actively worse for
+    the reader, because it suppressed the missing-path diagnostics that name
+    exactly which hooks failed to resolve. Measured before this narrowing: an
+    empty hooks dir reported `HOOKS: UNVERIFIED` instead of `NOT WIRED` with the
+    unresolved paths listed.
+
+    One `.py` is enough, deliberately. A partially-populated directory can still
+    self-certify a settings block that happens to name the hook it does have, and
+    "refuse" is the safe side of that line.
     """
     try:
-        return (directory / ".claude" / "hooks").is_dir()
+        hooks = directory / ".claude" / "hooks"
+        return hooks.is_dir() and any(hooks.glob("*.py"))
     except OSError:
         return False
 
