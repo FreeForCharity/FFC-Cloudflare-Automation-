@@ -855,7 +855,14 @@ async function main() {
       // page to go quiet lets a legitimate prefetch actually finish (and a
       // truly missing asset still fails, just on its own HTTP status rather
       // than on our teardown timing).
-      await tab.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+      await tab.waitForLoadState('networkidle', { timeout: 5000 }).catch((err) => {
+        // Only swallow the timeout itself -- that's the expected "still busy
+        // after 5s, move on" case. Anything else (page/target closed, a
+        // browser crash) is a real failure and must reach the outer catch
+        // below, which records it as a navigation problem; silently eating
+        // every error here would turn those into false passes instead.
+        if (err?.name !== 'TimeoutError') throw err;
+      });
 
       if (shots) {
         const name = path === '/' ? 'home' : path.replace(/^\/|\/$/g, '').replace(/\//g, '_');
