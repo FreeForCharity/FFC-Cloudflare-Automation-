@@ -32,7 +32,25 @@ jobs:
     runs-on: ubuntu-latest
     environment: github-prod
     steps:
+      # A scheduled run's default checkout is pinned to the SHA the run was
+      # CREATED at, not the SHA it eventually runs at. This job waits on the
+      # `github-prod` approval gate, which a cron cannot answer itself, so that
+      # SHA is as old as the wait -- and `peter-evans/create-pull-request` below
+      # branches from whatever is checked out.
+      #
+      # Measured 2026-09-07: run 11 was created 08-31 and approved seven days
+      # later. Its checkout was `2ceb54d`, so the data PR (#1249) opened 133
+      # commits behind `main` and Phantom Revert Guard failed it at a threshold
+      # of 5 -- a green generation that could not be merged without a manual
+      # update-branch. Every week this gate is answered late, this recurs.
+      #
+      # `ref: main` resolves at checkout time, so the branch is cut from `main`
+      # as it stands when the data is actually generated. It also means the
+      # generator script that runs is the current one rather than a week-old
+      # copy, which is the same freshness argument.
       - uses: actions/checkout@v7.0.1
+        with:
+          ref: main
 
       - name: Azure login (OIDC)
         uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3
